@@ -32,11 +32,18 @@ class MySQL_Connection_userinfo {
 	char *schemaname;
 	char *sha1_pass;
 	char *fe_username;
+#ifdef PROXYSQLC19
+	char *usid;
+	char *wusid;
+#endif
 	MySQL_Connection_userinfo();
 	~MySQL_Connection_userinfo();
 	void set(char *, char *, char *, char *);
 	void set(MySQL_Connection_userinfo *);
 	bool set_schemaname(char *, int);
+#ifdef PROXYSQLC19
+	void set_usid(char *, char *);
+#endif	
 };
 
 class MySQL_Connection {

@@ -474,6 +474,11 @@ MySQL_Session::MySQL_Session() {
 	gtid_hid = -1;
 	memset(gtid_buf,0,sizeof(gtid_buf));
 
+#ifdef PROXYSQLC19
+	memset(&c_ctx,0,sizeof(c_ctx));
+	c19=false;
+#endif
+
 	match_regexes=NULL;
 /*
 	match_regexes=(Session_Regex **)malloc(sizeof(Session_Regex *)*3);
@@ -4113,12 +4118,25 @@ handler_again:
 				gtid_hid = -1;
 				if (rc==0) {
 					if (myconn->get_gtid(mybe->gtid_uuid,&mybe->gtid_trxid)) {
+#ifdef PROXYSQLC19
+						if (c19) {
+							MyHGM->save_gtid_ctx(this, mybe->gtid_uuid, myconn->parent);
+						}
+#endif
 						if (mysql_thread___client_session_track_gtid) {
 							gtid_hid = current_hostgroup;
 							memcpy(gtid_buf,mybe->gtid_uuid,sizeof(gtid_buf));
 						}
 					}
-
+#ifdef PROXYSQLC19
+					else if (c_ctx.token > 0) {
+						if (!c19) {
+							proxy_warning("Memcached consistency on result not closed but c19 is false! something wrong! force close: %s, %d, %s, %d\n", c_ctx.srv ? c_ctx.srv->address : "", c_ctx.srv ? c_ctx.srv->port : 0, c_ctx.gtid, c_ctx.token);
+						}
+						c19log("No gtid returned close context\n");						
+						MyHGM->close_write_gtid_ctx(this);
+					}
+#endif
 					// check if multiplexing needs to be disabled
 					char *qdt=CurrentQuery.get_digest_text();
 					if (qdt)
@@ -4218,6 +4236,15 @@ handler_again:
 					if (rc==-1) {
 						int myerr=mysql_errno(myconn->mysql);
 						char *errmsg = NULL;
+#ifdef PROXYSQLC19
+						if (c_ctx.token > 0) {
+							if (!c19) {
+								proxy_warning("Memcached consistency on error not closed but c19 is false! something wrong! force close: %s, %d, %s, %d\n", c_ctx.srv ? c_ctx.srv->address : "", c_ctx.srv ? c_ctx.srv->port : 0, c_ctx.gtid, c_ctx.token);
+							}						
+							c19log("On error close context\n");						
+							MyHGM->close_write_gtid_ctx(this);
+						}
+#endif
 						if (myerr == 0) {
 							if (CurrentQuery.mysql_stmt) {
 								myerr = mysql_stmt_errno(CurrentQuery.mysql_stmt);
@@ -6461,100 +6488,161 @@ void MySQL_Session::handler___status_WAITING_CLIENT_DATA___STATE_SLEEP___MYSQL_C
 }
 
 void MySQL_Session::handler___client_DSS_QUERY_SENT___server_DSS_NOT_INITIALIZED__get_connection() {
-			// Get a MySQL Connection
-
-		MySQL_Connection *mc=NULL;
-		MySQL_Backend * _gtid_from_backend = NULL;
-		char uuid[64];
-		char * gtid_uuid=NULL;
-		uint64_t trxid = 0;
-		unsigned long long now_us = 0;
-		if (qpo->max_lag_ms >= 0) {
-			if (qpo->max_lag_ms > 360000) { // this is an absolute time, we convert it to relative
-				if (now_us == 0) {
-					now_us = realtime_time();
-				}
-				long long now_ms = now_us/1000;
-				qpo->max_lag_ms = now_ms - qpo->max_lag_ms;
-				if (qpo->max_lag_ms < 0) {
-					qpo->max_lag_ms = -1; // time expired
-				}
+	// Get a MySQL Connection
+	MySQL_Connection *mc=NULL;
+	MySQL_Backend * _gtid_from_backend = NULL;
+	char uuid[64];
+	char * gtid_uuid=NULL;
+	uint64_t trxid = 0;
+	unsigned long long now_us = 0;
+#ifdef PROXYSQLC19
+	bool cached = false;
+	c19 = false;
+	if (c_ctx.token > 0) {
+		proxy_warning("Memcached consistency not closed! something wrong! force close: %s, %d, %s, %d\n", c_ctx.srv ? c_ctx.srv->address : "", c_ctx.srv ? c_ctx.srv->port : 0, c_ctx.gtid, c_ctx.token);
+		MyHGM->close_write_gtid_ctx(this);
+	}
+//		memset(&c_ctx,0,sizeof(c_ctx));
+#endif
+	if (qpo->max_lag_ms >= 0) {
+		if (qpo->max_lag_ms > 360000) { // this is an absolute time, we convert it to relative
+			if (now_us == 0) {
+				now_us = realtime_time();
+			}
+			long long now_ms = now_us/1000;
+			qpo->max_lag_ms = now_ms - qpo->max_lag_ms;
+			if (qpo->max_lag_ms < 0) {
+				qpo->max_lag_ms = -1; // time expired
 			}
 		}
-		if (session_fast_forward == false) {
-			if (qpo->min_gtid) {
-				gtid_uuid = qpo->min_gtid;
-			} else if (qpo->gtid_from_hostgroup >= 0) {
-				_gtid_from_backend = find_backend(qpo->gtid_from_hostgroup);
-				if (_gtid_from_backend) {
-					if (_gtid_from_backend->gtid_uuid[0]) {
-						gtid_uuid = _gtid_from_backend->gtid_uuid;
+	}
+	if (session_fast_forward == false) {
+		if (qpo->min_gtid) {
+			gtid_uuid = qpo->min_gtid;
+		} else if (qpo->gtid_from_hostgroup >= 0) {
+			_gtid_from_backend = find_backend(qpo->gtid_from_hostgroup);
+			if (_gtid_from_backend) {
+#ifdef PROXYSQLC19
+				if ((c19 = MyHGM->get_read_gtid_ctx(this, qpo->gtid_from_hostgroup))) {
+					if (c_ctx.gtid[0]) {
+						gtid_uuid = c_ctx.gtid;
 					}
+				} else if (_gtid_from_backend->gtid_uuid[0]) {
+					gtid_uuid = _gtid_from_backend->gtid_uuid;
 				}
+#else
+				if (_gtid_from_backend->gtid_uuid[0]) {
+					gtid_uuid = _gtid_from_backend->gtid_uuid;
+				}
+#endif
 			}
-
-			char *sep_pos = NULL;
-			if (gtid_uuid != NULL) {
-				sep_pos = index(gtid_uuid,':');
-				if (sep_pos == NULL) {
-					gtid_uuid = NULL; // gtid is invalid
-				}
-			}
-
-			if (gtid_uuid != NULL) {
-				int l = sep_pos - gtid_uuid;
-				trxid = strtoull(sep_pos+1, NULL, 10);
-				int m;
-				int n=0;
-				for (m=0; m<l; m++) {
-					if (gtid_uuid[m] != '-') {
-						uuid[n]=gtid_uuid[m];
-						n++;
-					}
-				}
-				uuid[n]='\0';
-				mc=thread->get_MyConn_local(mybe->hostgroup_id, this, uuid, trxid, -1);
-			} else {
-				mc=thread->get_MyConn_local(mybe->hostgroup_id, this, NULL, 0, (int)qpo->max_lag_ms);
+		} 
+#ifdef PROXYSQLC19
+		else if ((c19 = MyHGM->get_write_gtid_ctx(this, mybe->hostgroup_id))) {
+			if (c_ctx.gtid[0] && !c_ctx.running) { // If there is a running query we do not use gtid
+				gtid_uuid = c_ctx.gtid;
 			}
 		}
-		if (mc==NULL) {
-			if (trxid) {
-				mc=MyHGM->get_MyConn_from_pool(mybe->hostgroup_id, this, session_fast_forward, uuid, trxid, -1);
-			} else {
-				mc=MyHGM->get_MyConn_from_pool(mybe->hostgroup_id, this, session_fast_forward, NULL, 0, (int)qpo->max_lag_ms);
+#endif
+		char *sep_pos = NULL;
+		if (gtid_uuid != NULL) {
+			sep_pos = index(gtid_uuid,':');
+			if (sep_pos == NULL) {
+				gtid_uuid = NULL; // gtid is invalid
 			}
+		}
+
+		if (gtid_uuid != NULL) {
+			int l = sep_pos - gtid_uuid;
+			trxid = strtoull(sep_pos+1, NULL, 10);
+			int m;
+			int n=0;
+			for (m=0; m<l; m++) {
+				if (gtid_uuid[m] != '-') {
+					uuid[n]=gtid_uuid[m];
+					n++;
+				}
+			}
+			uuid[n]='\0';
+			mc=thread->get_MyConn_local(mybe->hostgroup_id, this, uuid, trxid, -1);
+#ifdef PROXYSQLC19
+		} else if (c19 && c_ctx.token && c_ctx.running) { // If we are in write concistency and there is a running query we force the right server
+			mc=thread->get_MySrvConn_local(this, c_ctx.srv);
+#endif
 		} else {
-			thread->status_variables.ConnPool_get_conn_immediate++;
+			mc=thread->get_MyConn_local(mybe->hostgroup_id, this, NULL, 0, (int)qpo->max_lag_ms);
 		}
-		if (mc) {
-			mybe->server_myds->attach_connection(mc);
-			thread->status_variables.ConnPool_get_conn_success++;
+#ifdef PROXYSQLC19
+		cached = mc ? true : false;
+#endif			
+	}
+	if (mc==NULL) {
+		if (trxid) {
+			mc=MyHGM->get_MyConn_from_pool(mybe->hostgroup_id, this, session_fast_forward, uuid, trxid, -1);
+#ifdef PROXYSQLC19
+		} else if (c19 && c_ctx.token && c_ctx.running) { // If we are in write concistency and there is a running query we force the right server
+			mc=MyHGM->get_MySrvConn_from_pool(this, c_ctx.srv);
+#endif
 		} else {
-			thread->status_variables.ConnPool_get_conn_failure++;
+			mc=MyHGM->get_MyConn_from_pool(mybe->hostgroup_id, this, session_fast_forward, NULL, 0, (int)qpo->max_lag_ms);
 		}
-		if (qpo->max_lag_ms >= 0) {
-			if (qpo->max_lag_ms <= 360000) { // this is a relative time , we convert it to absolute
-				if (mc == NULL) {
-					if (CurrentQuery.waiting_since == 0) {
-						CurrentQuery.waiting_since = thread->curtime;
-						thread->status_variables.queries_with_max_lag_ms__delayed++;
-					}
-				}
-				if (now_us == 0) {
-					now_us = realtime_time();
-				}
-				long long now_ms = now_us/1000;
-				qpo->max_lag_ms = now_ms - qpo->max_lag_ms;
+	} else {
+		thread->status_variables.ConnPool_get_conn_immediate++;
+	}
+#ifdef PROXYSQLC19
+	if (c19 && !mc && gtid_uuid) { 
+// Are we sure that the binlog reader has read all other writes and is not lagging a bit? 
+// without lag this is an impossible condition because at least one node should have been chosen, so if we have no connection
+// binlog is lagging a bit, so we force the node from memcached
+		proxy_warning("No valid server for gtid %s! Is bin logreader lagging? fallback to %s:%d write token is %lu write key is %s read key is %s last running is %lu\n", gtid_uuid, c_ctx.srv->address, c_ctx.srv->port, c_ctx.token, c_ctx.wkey, c_ctx.rkey, c_ctx.running);
+		mc=thread->get_MySrvConn_local(this, c_ctx.srv);
+		if (!mc) {
+			mc=MyHGM->get_MySrvConn_from_pool(this, c_ctx.srv);
+		} else {
+			cached = true;
+		}
+	}
+	if (c19 && mc && c_ctx.token) { // if we are in write consistency
+		if (!MyHGM->validate_write_gtid_ctx(this, mc) && c_ctx.srv) { // server has been changed so we need to force the new destination
+			if (cached) {
+				thread->push_MyConn_local(mc);
+			} else {
+				MyHGM->push_MyConn_to_pool(mc);
+			}
+			if (!(mc=thread->get_MySrvConn_local(this, c_ctx.srv))) {
+				mc=MyHGM->get_MySrvConn_from_pool(this, c_ctx.srv);
 			}
 		}
-		if (mc) {
-			if (CurrentQuery.waiting_since) {
-				unsigned long long waited = thread->curtime - CurrentQuery.waiting_since;
-				thread->status_variables.queries_with_max_lag_ms__total_wait_time_us += waited;
-				CurrentQuery.waiting_since = 0;
+	}
+#endif
+	if (mc) {
+		mybe->server_myds->attach_connection(mc);
+		thread->status_variables.ConnPool_get_conn_success++;
+	} else {
+		thread->status_variables.ConnPool_get_conn_failure++;
+	}
+	if (qpo->max_lag_ms >= 0) {
+		if (qpo->max_lag_ms <= 360000) { // this is a relative time , we convert it to absolute
+			if (mc == NULL) {
+				if (CurrentQuery.waiting_since == 0) {
+					CurrentQuery.waiting_since = thread->curtime;
+					thread->status_variables.queries_with_max_lag_ms__delayed++;
+				}
 			}
+			if (now_us == 0) {
+				now_us = realtime_time();
+			}
+			long long now_ms = now_us/1000;
+			qpo->max_lag_ms = now_ms - qpo->max_lag_ms;
 		}
+	}
+	if (mc) {
+		if (CurrentQuery.waiting_since) {
+			unsigned long long waited = thread->curtime - CurrentQuery.waiting_since;
+			thread->status_variables.queries_with_max_lag_ms__total_wait_time_us += waited;
+			CurrentQuery.waiting_since = 0;
+		}
+	}
 	proxy_debug(PROXY_DEBUG_MYSQL_CONNECTION, 5, "Sess=%p -- server_myds=%p -- MySQL_Connection %p\n", this, mybe->server_myds,  mybe->server_myds->myconn);
 	if (mybe->server_myds->myconn==NULL) {
 		// we couldn't get a connection for whatever reason, ex: no backends, or too busy
@@ -6780,6 +6868,7 @@ unsigned int MySQL_Session::NumActiveTransactions() {
 	unsigned int i;
 	for (i=0; i < mybes->len; i++) {
 		_mybe=(MySQL_Backend *)mybes->index(i);
+//		c19log("server_myds %p myconn %p", _mybe->server_myds, _mybe->server_myds ? _mybe->server_myds->myconn : NULL);
 		if (_mybe->server_myds)
 			if (_mybe->server_myds->myconn)
 				if (_mybe->server_myds->myconn->IsActiveTransaction())

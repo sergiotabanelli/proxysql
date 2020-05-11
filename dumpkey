@@ -1,0 +1,10 @@
+#/bin/bash
+set -f
+T=$(memcat --server=memcached $1)
+C=$2
+F=$((T-C))
+
+for i in $(seq $F $T); do
+    V=$(memcat --server=memcached $1:$i)
+    echo "$1:$i -> $V"
+done

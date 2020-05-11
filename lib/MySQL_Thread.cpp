@@ -6353,6 +6353,50 @@ MySQL_Connection * MySQL_Thread::get_MyConn_local(unsigned int _hid, MySQL_Sessi
 	return NULL;
 }
 
+#ifdef PROXYSQLC19
+MySQL_Connection * MySQL_Thread::get_MySrvConn_local(MySQL_Session *sess, MySrvC *srv) {
+	c19log("Enter %p %p\n", sess, srv);
+	unsigned int i;
+	unsigned int bc = 0; // best candidate
+	bool pcf = false; // possible candidate found
+	unsigned int npc = 0; // number of possible candidates
+	std::vector<MySrvC *> parents;
+	MySQL_Connection *c=NULL;
+	for (i=0; i<cached_connections->len; i++) {
+		c=(MySQL_Connection *)cached_connections->index(i);
+		if ((c->parent == srv || (!strcmp(srv->address, c->parent->address) && srv->port == c->parent->port)) && sess->client_myds->myconn->match_tracked_options(c)) {
+			if (pcf == false) {
+				bc = i;
+				pcf = true;
+			}
+			npc++;
+			if (sess && sess->client_myds && sess->client_myds->myconn && sess->client_myds->myconn->userinfo) {
+				char *schema = sess->client_myds->myconn->userinfo->schemaname;
+				char *username = sess->client_myds->myconn->userinfo->username;
+				if (strcmp(c->userinfo->schemaname,schema)==0 && strcmp(c->userinfo->username,username)==0) {
+					c=(MySQL_Connection *)cached_connections->remove_index_fast(i);
+					c19log("Return %p\n", c);
+					return c;
+				}
+			} else {
+				c=(MySQL_Connection *)cached_connections->remove_index_fast(i);
+				c19log("Return %p\n", c);
+				return c;
+			}
+		}
+	}
+	if (pcf) { // there was a possible connection, but we skipped trying to find a better one
+		if (npc > 5) { // more candidates were evaluated
+			c=(MySQL_Connection *)cached_connections->remove_index_fast(bc);
+			c19log("Return %p\n", c);
+			return c;
+		}
+	}
+	c19log("Return NULL\n");
+	return NULL;
+}
+#endif
+
 void MySQL_Thread::push_MyConn_local(MySQL_Connection *c) {
 	MySrvC *mysrvc=NULL;
 	mysrvc=(MySrvC *)c->parent;

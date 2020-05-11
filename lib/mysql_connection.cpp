@@ -50,6 +50,10 @@ MySQL_Connection_userinfo::MySQL_Connection_userinfo() {
 	schemaname=NULL;
 	fe_username=NULL;
 	hash=0;
+#ifdef PROXYSQLC19
+	usid=NULL;
+	wusid=NULL;
+#endif
 }
 
 MySQL_Connection_userinfo::~MySQL_Connection_userinfo() {
@@ -58,6 +62,10 @@ MySQL_Connection_userinfo::~MySQL_Connection_userinfo() {
 	if (password) free(password);
 	if (sha1_pass) free(sha1_pass);
 	if (schemaname) free(schemaname);
+#ifdef PROXYSQLC19
+	if (usid) free(usid);
+	if (wusid) free(wusid);
+#endif
 }
 
 void MySQL_Connection::compute_unknown_transaction_status() {
@@ -155,8 +163,41 @@ void MySQL_Connection_userinfo::set(char *u, char *p, char *s, char *sh1) {
 
 void MySQL_Connection_userinfo::set(MySQL_Connection_userinfo *ui) {
 	set(ui->username, ui->password, ui->schemaname, ui->sha1_pass);
+#ifdef PROXYSQLC19
+	set_usid(ui->usid, ui->wusid);
+#endif
 }
 
+#ifdef PROXYSQLC19
+void MySQL_Connection_userinfo::set_usid(char *us, char *wus) {
+	if (us) {
+		if (usid) {
+			if (strcmp(us,usid)) {
+				free(usid);
+				usid=strdup(us);
+			}
+		} else {
+			usid=strdup(us);
+		}
+	} else if (usid) {
+		free(usid);
+		usid=NULL;
+	}
+	if (wus) {
+		if (wusid) {
+			if (strcmp(wus,wusid)) {
+				free(wusid);
+				wusid=strdup(wus);
+			}
+		} else {
+			wusid=strdup(wus);
+		}
+	} else if (wusid) {
+		free(wusid);
+		wusid=NULL;
+	}
+}
+#endif
 
 bool MySQL_Connection_userinfo::set_schemaname(char *_new, int l) {
 	int _l=0;

@@ -113,6 +113,13 @@ void init_debug_struct_from_cmdline();
 void proxy_debug_func(enum debug_module, int, int, const char *, int, const char *, const char *, ...);
 #endif
 
+#ifdef PROXYSQLC19
+#define c19log(fmt, ...)
+//#define c19log(fmt, ...) proxy_warning(fmt, ## __VA_ARGS__)
+//#define c19log1(fmt, ...)
+#define c19log1(fmt, ...) proxy_warning(fmt, ## __VA_ARGS__)
+#endif
+
 #ifdef __cplusplus
 }
 #endif /* __cplusplus */

@@ -1,0 +1,16 @@
+#/bin/bash
+set -f
+SECONDS=0
+if [ -z "$3" ]; then
+    S=""
+else
+    S="$3"
+fi
+for i in $(seq 1 $2); do
+    ./myt $1 "pippo$i" "$S" &
+    pids[${i}]=$!
+done
+for pid in ${pids[*]}; do
+    wait $pid
+done
+echo "INSTANCE $S RUNNING FOR $SECONDS SECONDS"

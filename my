@@ -1,0 +1,13 @@
+#/bin/bash
+set -f
+if [ -z "$2" ]; then
+    SI='pippo'
+else
+    SI="$2"
+fi
+if [ -z "$3" ]; then
+    S=""
+else
+    S="$3"
+fi
+MYSQL_PWD=password mysql -u "root#$SI" -h 127.0.0.1 -P"${S}6033" -B -N -s -e "$1"

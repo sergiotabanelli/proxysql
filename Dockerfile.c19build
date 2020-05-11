@@ -1,0 +1,8 @@
+FROM proxysql/packaging:build-centos7
+LABEL Name=proxysqlc19:build-centos7
+RUN yum update -y
+RUN yum install -y epel-release \ 
+        yum-utils
+RUN yum --disablerepo=epel -y update ca-certificates
+RUN yum install -y gnutls-devel libtool mariadb libmemcached
+RUN yum clean all

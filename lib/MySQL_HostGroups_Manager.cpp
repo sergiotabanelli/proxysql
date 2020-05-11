@@ -4,6 +4,9 @@
 
 #include "MySQL_PreparedStatement.h"
 #include "MySQL_Data_Stream.h"
+#ifdef PROXYSQLC19
+#include "query_processor.h"
+#endif
 
 #define char_malloc (char *)malloc
 #define itostr(__s, __i)  { __s=char_malloc(32); sprintf(__s, "%lld", __i); }
@@ -399,6 +402,7 @@ bool GTID_Server_Data::gtid_exists(char *gtid_uuid, uint64_t gtid_trxid) {
 	for (auto itr = it->second.begin(); itr != it->second.end(); ++itr) {
 		if ((int64_t)gtid_trxid >= itr->first && (int64_t)gtid_trxid <= itr->second) {
 //			fprintf(stderr,"YES\n");
+			c19log("node %s trxid %llu first %llu second %llu\n", address, gtid_trxid, itr->first, itr->second);
 			return true;
 		}
 	}
@@ -1004,6 +1008,9 @@ MySQL_HostGroups_Manager::MySQL_HostGroups_Manager() {
 	incoming_group_replication_hostgroups=NULL;
 	incoming_galera_hostgroups=NULL;
 	incoming_aws_aurora_hostgroups = NULL;
+#ifdef PROXYSQLC19
+	incoming_memcached_hostgroups = NULL;
+#endif
 	pthread_rwlock_init(&gtid_rwlock, NULL);
 	gtid_missing_nodes = false;
 	gtid_ev_loop=NULL;
@@ -1448,7 +1455,11 @@ bool MySQL_HostGroups_Manager::commit() {
 		generate_mysql_aws_aurora_hostgroups_table();
 	}
 
-
+#ifdef PROXYSQLC19
+	if (incoming_memcached_hostgroups) {
+		generate_memcached_hostgroups();
+	}
+#endif
 	if ( GloAdmin && GloAdmin->checksum_variables.checksum_mysql_servers ) {
 		uint64_t hash1=0, hash2=0;
 		SpookyHash myhash;
@@ -1598,6 +1609,23 @@ bool MySQL_HostGroups_Manager::commit() {
 				delete resultset;
 			}
 		}
+#ifdef PROXYSQLC19
+		{
+			if (incoming_memcached_hostgroups) {
+				if (incoming_memcached_hostgroups->rows_count) {
+					if (init == false) {
+						init = true;
+						myhash.Init(19,3);
+					}
+					uint64_t hash1_ = incoming_memcached_hostgroups->raw_checksum();
+					myhash.Update(&hash1_, sizeof(hash1_));
+				}
+				delete incoming_memcached_hostgroups;
+				incoming_memcached_hostgroups=NULL;
+			}
+		}
+#endif
+
 		if (init == true) {
 			myhash.Final(&hash1, &hash2);
 		}
@@ -5981,4 +6009,975 @@ void MySQL_HostGroups_Manager::update_aws_aurora_set_reader(int _whid, int _rhid
 	free(domain_name);
 }
 
+#ifdef PROXYSQLC19
+Memcached_Info::Memcached_Info(int h, char *s, int d, char *r, char *w, int t, bool _a, char *c) {
+	comment=NULL;
+	writer_key=NULL;
+	if (w) {
+		writer_key=strdup(w);
+	}
+	if (c) {
+		comment=strdup(c);
+	}
+	hostgroup=h;
+	connection_string=strdup(s);
+	depth=d;
+	reader_key=strdup(r);
+	active=_a;
+	__active=true;
+	need_converge=true;
+	mpool=NULL;
+	ttl=t;
+}
+
+Memcached_Info::~Memcached_Info() {
+	if (writer_key) {
+		free(writer_key);
+		writer_key=NULL;
+	}
+	if (comment) {
+		free(comment);
+		comment=NULL;
+	}
+	if (mpool) {
+		memcached_pool_destroy(mpool);
+		mpool=NULL;
+	}
+	free(connection_string);
+	connection_string=NULL;
+	free(reader_key);
+	reader_key=NULL;
+
+}
+
+bool Memcached_Info::update(char *s, unsigned int d, char *r, char *w, int t, bool _a, char *c) {
+	bool ret=false;
+	__active=true;
+	if (depth!=d) {
+		depth=d;
+		ret=true;
+	}
+	if (ttl != t) {
+		ttl=t;
+		ret=true;
+	}
+	if (strcmp(connection_string,s)) {
+		free(connection_string);
+		connection_string=strdup(s);
+		if (mpool) {
+			memcached_pool_destroy(mpool);
+			mpool=NULL;
+		}
+		ret=true;
+	}
+	if (strcmp(reader_key,r)) {
+		free(reader_key);
+		reader_key=strdup(r);
+		ret=true;
+	}
+	if (writer_key) {
+		if (w) {
+			if (strcmp(writer_key,w)) {
+				free(writer_key);
+				writer_key=strdup(w);
+				ret=true;
+			}
+		} else {
+			free(writer_key);
+			writer_key=NULL;
+			ret=true;
+		}
+	} else {
+		if (w) {
+			writer_key=strdup(w);
+			ret=true;
+		}
+	}
+	// for comment we don't change return value
+	if (comment) {
+		if (c) {
+			if (strcmp(comment,c)) {
+				free(comment);
+				comment=strdup(c);
+			}
+		} else {
+			free(comment);
+			comment=NULL;
+		}
+	} else {
+		if (c) {
+			comment=strdup(c);
+		}
+	}
+	return ret;
+}
+bool Memcached_Info::fetch(memcached_conn *conn) {
+	if (!active) {
+		return false;
+	}
+	if (!mpool) {
+		mpool=memcached_pool(connection_string,strlen(connection_string));
+	}
+	if (!mpool) {
+		conn->mconn = NULL;
+		conn->mpool = NULL;
+		return false;
+	}
+	conn->mconn=memcached_pool_fetch(mpool,NULL,NULL);
+	/*
+	if (conn->mconn) {
+		memcached_return_t rc = memcached_set_memory_allocators(conn->mconn, mem_malloc, mem_free, mem_realloc, mem_calloc, (void *) NULL);
+		if (rc != MEMCACHED_SUCCESS) {
+			proxy_warning("Errong setting mem allocators %d", rc);
+		}
+	}
+	*/
+	conn->mpool=mpool;
+	return conn->mconn ? true : false;
+}
+void Memcached_Info::release(memcached_conn *conn) {
+	if (mpool != conn->mpool) {
+		if (conn->mconn) {
+			memcached_free(conn->mconn);
+		}
+	} else if (mpool && conn->mconn) {
+		memcached_pool_release(conn->mpool,conn->mconn);
+	}
+	conn->mpool=NULL;
+	conn->mconn=NULL;
+}
+
+void Memcached_Info::replace_placeholders(MySQL_Session *sess, consistency_ctx *c_ctx, bool read) {
+	// to speed up replacement placeholder are 1 character preceded by '#', i.e #S (for usid), #U (for USER)....
+	c19log("Enter %p %p %d\n", sess, c_ctx, read);
+	if (writer_key) {
+		char *w = writer_key;
+		char *wk = c_ctx->wkey;
+		while (*w) {
+			char *val = NULL;
+			if (*w == P_MARKER) {
+				switch (*(w + 1))
+				{
+				case P_USID:
+					val = sess->client_myds->myconn->userinfo->usid;
+					break;				
+				case P_WUSID:
+					val = sess->client_myds->myconn->userinfo->wusid;
+					break;				
+				case P_USER:
+					val = sess->client_myds->myconn->userinfo->username;
+					break;				
+				case P_DB:
+					val = sess->client_myds->myconn->userinfo->schemaname;
+					break;				
+				default:
+					proxy_warning("On replace placeholder: invalid placeholder for wkey %s %d\n", writer_key, hostgroup);
+					break;
+				}
+			}
+			if (val) {
+				if ((wk - c_ctx->wkey + strlen(val)) > sizeof(c_ctx->wkey) - 1) {
+					proxy_warning("On replace placeholder: expanded wkey too long %s %d\n", writer_key, hostgroup);
+					break;
+				} 
+				w += 2;
+				memcpy(wk, val, strlen(val));
+				wk += strlen(val);
+			} else {
+				if ((wk - c_ctx->wkey + 1) > sizeof(c_ctx->wkey) - 1) {
+					proxy_warning("On replace placeholder: expanded wkey too long %s %d\n", writer_key, hostgroup);
+					break;
+				} 
+				*wk = *w;
+				wk++;
+				w++;
+			}
+			*wk = 0;
+		}
+	}
+	if (read) {
+		char *r = reader_key;
+		char *rk = c_ctx->rkey;
+		while (*r) {
+			char *val = NULL;
+			if (*r == P_MARKER) {
+				switch (*(r + 1))
+				{
+				case P_USID:
+					val = sess->client_myds->myconn->userinfo->usid;
+					break;				
+				case P_WUSID:
+					val = sess->client_myds->myconn->userinfo->wusid;
+					break;				
+				case P_USER:
+					val = sess->client_myds->myconn->userinfo->username;
+					break;				
+				case P_DB:
+					val = sess->client_myds->myconn->userinfo->schemaname;
+					break;				
+				default:
+					proxy_warning("On replace placeholder: invalid placeholder for rkey %s %d\n", reader_key, hostgroup);
+					break;
+				}
+			}
+			if (val) {
+				if ((rk - c_ctx->rkey + strlen(val)) > sizeof(c_ctx->rkey) - 1) {
+					proxy_warning("On replace placeholder: expanded rkey too long %s %d\n", reader_key, hostgroup);
+					break;
+				} 
+				r += 2;
+				memcpy(rk, val, strlen(val));
+				rk += strlen(val);
+			} else {
+				if ((rk - c_ctx->rkey + 1) > sizeof(c_ctx->rkey) - 1) {
+					proxy_warning("On replace placeholder: expanded key too long %s %d\n", reader_key, hostgroup);
+					break;
+				} 
+				*rk = *r;
+				rk++;
+				r++;
+			}
+			*rk = 0;
+		}
+	}
+	c19log("Return %s %s\n", c_ctx->rkey, c_ctx->wkey);
+}
+
+void MySQL_HostGroups_Manager::generate_memcached_hostgroups() {
+	if (incoming_memcached_hostgroups==NULL) {
+		return;
+	}
+	proxy_info("New memcached_hostgroups\n");
+	for (std::map<int , Memcached_Info *>::iterator it1 = Memcached_Info_Map.begin() ; it1 != Memcached_Info_Map.end(); ++it1) {
+		Memcached_Info *info=NULL;
+		info=it1->second;
+		info->__active=false;
+	}
+	for (std::vector<SQLite3_row *>::iterator it = incoming_memcached_hostgroups->rows.begin() ; it != incoming_memcached_hostgroups->rows.end(); ++it) {
+		SQLite3_row *r=*it;
+		int hostgroup=atoi(r->fields[0]);
+		int depth=atoi(r->fields[2]);
+		int ttl = atoi(r->fields[5]);
+		int active=atoi(r->fields[6]);
+		proxy_info("Loading Memcached info for (%d,%s,%d,%s,%s,%d,%s,\"%s\")\n", hostgroup,r->fields[1],depth,r->fields[3],r->fields[4],ttl,(active ? "on" : "off"),r->fields[7]);
+		std::map<int , Memcached_Info *>::iterator it2;
+		it2 = Memcached_Info_Map.find(hostgroup);
+		Memcached_Info *info=NULL;
+		if (it2!=Memcached_Info_Map.end()) {
+			info=it2->second;
+			bool changed=false;
+			changed=info->update(r->fields[1],depth,r->fields[3],r->fields[4], ttl, (bool)active, r->fields[7]);
+			if (changed) {
+				//info->need_converge=true;
+			}
+		} else {
+			info=new Memcached_Info(hostgroup,r->fields[1],depth,r->fields[3],r->fields[4], ttl, (bool)active, r->fields[7]);
+			//info->need_converge=true;
+			Memcached_Info_Map.insert(Memcached_Info_Map.begin(), std::pair<int, Memcached_Info *>(hostgroup,info));
+		}
+	}
+
+	// remove missing ones
+	for (auto it3 = Memcached_Info_Map.begin(); it3 != Memcached_Info_Map.end(); ) {
+		Memcached_Info *info=it3->second;
+		if (info->__active==false) {
+			delete info;
+			it3 = Memcached_Info_Map.erase(it3);
+		} else {
+			it3++;
+		}
+	}
+}
+
+void MySQL_HostGroups_Manager::set_incoming_memcached_hostgroups(SQLite3_result *s) {
+	if (incoming_memcached_hostgroups) {
+		delete incoming_memcached_hostgroups;
+		incoming_memcached_hostgroups = NULL;
+	}
+	incoming_memcached_hostgroups=s;
+}
+
+MySQL_Connection *MySQL_HostGroups_Manager::get_MySrvConn_from_pool(MySQL_Session *sess, MySrvC *mysrvc) {
+	MySQL_Connection * conn=NULL;
+	c19log("Enter %p %p\n", sess, mysrvc);
+	wrlock(); //TODO: ? We need to check if mysrvc is still active?
+	status.myconnpoll_get++;
+	if (mysrvc) {
+		conn=mysrvc->ConnectionsFree->get_random_MyConn(sess, false);
+		if (conn) {
+			mysrvc->ConnectionsUsed->add(conn);
+			status.myconnpoll_get_ok++;
+			mysrvc->update_max_connections_used();
+		}
+	}
+	wrunlock();
+	c19log("Return %p\n", conn);
+	return conn;
+}
+
+bool MySQL_HostGroups_Manager::mem_fetch(Memcached_Info *info, memcached_conn *mc) {
+//	wrlock(); //Is memcached pool really thread safe?
+	bool ret = info->fetch(mc);
+//	wrunlock();
+	return ret;
+}
+
+void MySQL_HostGroups_Manager::mem_release(Memcached_Info *info, memcached_conn *mc) {
+//	wrlock(); //Is memcached pool really thread safe?
+	info->release(mc);
+//	wrunlock();	
+}
+
+static void clean_gtid_ctx(consistency_ctx *c_ctx) {
+	c_ctx->gtid[0] = 0;
+	c_ctx->hostgroup = 0;
+	c_ctx->prev = 0;
+	c_ctx->running = 0;
+	c_ctx->srv = NULL;
+	c_ctx->token = 0;
+}
+
+void MySQL_HostGroups_Manager::close_write_gtid_ctx(MySQL_Session *sess) {
+	c19log("Enter %p %lu %s\n", sess, sess->c_ctx.token, sess->c_ctx.wkey);
+	if (!sess->c_ctx.token || !sess->c_ctx.wkey[0]) {
+		return;
+	}
+	std::map<int , Memcached_Info *>::iterator it2=Memcached_Info_Map.find(sess->c_ctx.hostgroup);
+	if (it2!=Memcached_Info_Map.end()) {
+		memcached_conn mc;
+		mc.mconn=NULL;
+		mc.mpool=NULL;
+		Memcached_Info *info=it2->second;
+		if (mem_fetch(info, &mc)) {
+			memcached_return_t rc = MEMCACHED_SUCCESS;
+			memcached_st *memc=mc.mconn;
+			consistency_ctx *c_ctx=&sess->c_ctx;
+			int64_t to_remove = c_ctx->token - (info->depth * 2);
+			char *k=sess->qpo->c19_wkey ? sess->qpo->c19_wkey : c_ctx->wkey ;
+			size_t kl = strlen(k);
+			char ot[MAX_IDSIZE];
+			int l = snprintf(ot, MAX_IDSIZE - 1, "%s:%lu", k, c_ctx->token);
+			rc = memcached_append_by_key(memc, k, kl, ot, l, C19_VALUE_MARKER C19_VALUE_MARKER C19_CLOSED_MARKER, strlen(C19_VALUE_MARKER C19_VALUE_MARKER C19_CLOSED_MARKER), info->ttl, (uint32_t)0);
+			if (rc != MEMCACHED_SUCCESS) {
+				proxy_warning("On gtid close: error appending memcached closed %s %d\n", ot, rc);
+			}
+			if (to_remove > 0) {
+				l = snprintf(ot, MAX_IDSIZE - 1, "%s:%lu", k, to_remove);
+				c19log("Removing %s\n", ot);
+				if (rc != MEMCACHED_SUCCESS) {
+					proxy_warning("On gtid close: error deleting memcached old entry %s %d\n", ot, rc);
+				}
+			}
+			mem_release(info, &mc);
+		}
+	}
+	clean_gtid_ctx(&sess->c_ctx);
+	c19log("Return \n");
+	return;
+}
+
+void MySQL_HostGroups_Manager::save_gtid_ctx(MySQL_Session *sess, char *gtid, MySrvC *srvc) {
+	c19log("Enter %p %s %p\n", sess, gtid, srvc);
+	std::map<int , Memcached_Info *>::iterator it2=Memcached_Info_Map.find(sess->c_ctx.hostgroup);
+	if (it2!=Memcached_Info_Map.end()) {
+		memcached_conn mc;
+		mc.mconn=NULL;
+		mc.mpool=NULL;
+		Memcached_Info *info=it2->second;
+		if (mem_fetch(info, &mc)) {
+			memcached_return_t rc = MEMCACHED_SUCCESS;
+			memcached_st *memc=mc.mconn;
+			consistency_ctx *c_ctx=&sess->c_ctx;
+			char ot[MAX_IDSIZE];
+			char val[MAX_IDSIZE*4];
+			char *rk=sess->qpo->c19_rkey ? sess->qpo->c19_rkey : c_ctx->rkey;
+//			size_t rkl = strlen(rk);
+			char *wk=sess->qpo->c19_wkey ? sess->qpo->c19_wkey : c_ctx->wkey;
+			size_t wkl = strlen(wk);
+			int l = snprintf(ot, sizeof(ot) - 1, "%s" C19_VALUE_MARKER "%s", wk, rk);
+			int vl = snprintf(val, sizeof(val) - 1, "%s:%d" C19_VALUE_MARKER "%s", srvc->address, srvc->port, gtid);
+			rc = memcached_set_by_key(memc, wk, wkl, ot, l, val, vl, info->ttl, (uint32_t)0);
+			c19log("Set rkey %s val %s\n", ot, val);
+			if (rc != MEMCACHED_SUCCESS) {
+				proxy_warning("On gtid save: error setting memcached gtid %s %s %d\n", ot, val, rc);
+			}
+			if (wk[0] && c_ctx->token) {
+				long long to_remove = c_ctx->token - (info->depth * 2);
+				l = snprintf(ot, sizeof(ot) - 1, "%s:%lu", wk, c_ctx->token);
+				vl = snprintf(val, sizeof(val) - 1, "%s:%d" C19_VALUE_MARKER "%s" C19_VALUE_MARKER "%lu" C19_VALUE_MARKER "%s" C19_VALUE_MARKER C19_CLOSED_MARKER, srvc->address, srvc->port, c_ctx->gtid, c_ctx->running, gtid);
+				rc = memcached_set_by_key(memc, wk, wkl, ot, l, val, vl, info->ttl, (uint32_t)0);
+				c19log("Append wkey %s val %s\n", ot, val);
+				if (rc != MEMCACHED_SUCCESS) {
+					proxy_warning("On gtid save: error appending memcached gtid %s %s %d\n", ot, val, rc);
+				}
+				if (to_remove > 0) {
+					l = snprintf(ot, MAX_IDSIZE - 1, "%s:%llu", wk, to_remove);
+					c19log("Removing %s\n", ot);
+					rc = memcached_delete_by_key(memc, wk, wkl, ot, l, (time_t)0);
+					if (rc != MEMCACHED_SUCCESS) {
+						proxy_warning("On gtid save: error deleting memcached old entry %s %s %d\n", ot, val, rc);
+					}
+				}
+			}
+			mem_release(info, &mc);
+		} else {
+			proxy_warning("On gtid save: error getting memcached connection! for hostgroup %d\n", sess->c_ctx.hostgroup);
+		}
+	} else {
+		proxy_warning("On gtid save: error searching memcached hostgroup! for hostgroup %d\n", sess->c_ctx.hostgroup);
+	}
+	clean_gtid_ctx(&sess->c_ctx);
+	c19log("Return \n");
+	return;
+}
+
+bool MySQL_HostGroups_Manager::get_read_gtid_ctx(MySQL_Session *sess, int hid) {
+	c19log("Enter %p %d\n", sess, hid);
+	bool ret = true;
+	clean_gtid_ctx(&sess->c_ctx);
+	std::map<int , Memcached_Info *>::iterator it2=Memcached_Info_Map.find(hid);
+	if (it2!=Memcached_Info_Map.end()) {
+		memcached_conn mc;
+		mc.mconn=NULL;
+		mc.mpool=NULL;
+		Memcached_Info *info=it2->second;
+		if (mem_fetch(info, &mc)) {
+			memcached_return_t rc = MEMCACHED_SUCCESS;
+			memcached_st *memc=mc.mconn;
+			consistency_ctx *c_ctx=&sess->c_ctx;
+			char ot[MAX_IDSIZE];
+			c_ctx->hostgroup = hid;
+			char *rk=sess->qpo->c19_rkey ? sess->qpo->c19_rkey : c_ctx->rkey;
+//			size_t rkl = strlen(rk);
+			char *wk=sess->qpo->c19_wkey ? sess->qpo->c19_wkey : c_ctx->wkey;
+			if (sess->qpo->c19_wkey) { // If the write key is in a comment query we need to every time test if the token key is initialized
+				size_t kl = strlen(sess->qpo->c19_wkey);
+				rc = memcached_add_by_key(memc, sess->qpo->c19_wkey, kl, sess->qpo->c19_wkey, kl, "0", 1, (time_t)0, (uint32_t)0);
+				if (rc != MEMCACHED_SUCCESS && rc != MEMCACHED_NOTSTORED) {
+					proxy_warning("On gtid get read: error creating write context query key %s %d\n", wk, rc);
+				}
+			}
+			if (!c_ctx->rkey[0]) { // This is first call for this client connection so we need to inizialize keys
+				info->replace_placeholders(sess, c_ctx);
+				if (c_ctx->wkey[0]) { // if we have a write concistency key, check if token counter is initialized
+					size_t kl = strlen(c_ctx->wkey);
+					rc = memcached_add_by_key(memc, c_ctx->wkey, kl, c_ctx->wkey, kl, "0", 1, (time_t)0, (uint32_t)0);
+					if (rc != MEMCACHED_SUCCESS && rc != MEMCACHED_NOTSTORED) {
+						proxy_warning("On gtid get read: error creating write context key %s %d\n", c_ctx->wkey, rc);
+					}
+				}
+			}
+			size_t wkl = strlen(wk);
+			size_t l = snprintf(ot, MAX_IDSIZE - 1, "%s" C19_VALUE_MARKER "%s", wk, rk);
+			size_t vl = 0;
+			uint32_t flags;
+			c19log("Key %s\n", ot);
+			char *h = memcached_get_by_key(memc, wk, wkl, ot, l, &vl, &flags, &rc);
+			if (rc != MEMCACHED_SUCCESS && rc != MEMCACHED_NOTFOUND) {
+				proxy_warning("On gtid get read: error getting memcached gtid %s %d\n", ot, rc);
+				ret = false;
+			} else if (h) {
+				char *gtid = strchr(h, C19_VALUE_MARKER[0]);
+				if (gtid) {
+					*gtid = 0;
+					gtid++;
+					char *p = strchr(h, ':');
+					if (!p) {
+						proxy_warning("On gtid get read: error on memcached returned value host port %s %s\n", ot, h);
+						ret = false;
+					} else {
+						unsigned long port = strtoul(p + 1, NULL, 10);
+						MyHGC *myhgc=MyHGC_lookup(c_ctx->hostgroup);
+						unsigned int l=myhgc->mysrvs->cnt();
+						unsigned int j;
+						*p = 0;
+						for (j=0; j<l; j++) {
+							MySrvC *s = myhgc->mysrvs->idx(j);
+							if (!strcmp(s->address, h) && port == s->port) {
+								c_ctx->srv = s;
+								break;
+							}
+						}
+						if (!c_ctx->srv) {
+							proxy_warning("On gtid get read: error searching host for running query %s %s %d\n", ot, h, port);
+							ret = false;
+						} else {
+							strncpy(c_ctx->gtid, gtid, sizeof(c_ctx->gtid) - 1);
+						}
+					}
+				} else {
+					proxy_warning("On gtid get read: error getting gtid value %s %s\n", ot, h);
+					ret = false;
+				}
+				free(h);
+			}
+			mem_release(info, &mc);
+		}  else {
+			proxy_warning("On gtid get read: error getting memcached connection! for hostgroup %d\n", hid);
+			ret = false;
+		}
+	} else {
+		ret = false;
+	}
+	if (!ret) {
+		clean_gtid_ctx(&sess->c_ctx);
+	}
+	c19log("Return %d gtid %s rkey %s node %s\n", ret, sess->c_ctx.gtid, sess->c_ctx.rkey, sess->c_ctx.srv ? sess->c_ctx.srv->address : "");
+	return ret;
+}
+/* This the not optimized version
+bool MySQL_HostGroups_Manager::get_write_gtid_ctx(MySQL_Session *sess, int hid) {
+	c19log("Enter %p %d\n", sess, hid);
+	bool ret = true;
+	clean_gtid_ctx(&sess->c_ctx);
+	std::map<int , Memcached_Info *>::iterator it2=Memcached_Info_Map.find(hid);
+	if (it2!=Memcached_Info_Map.end() && it2->second->writer_key) {
+		memcached_conn mc;
+		mc.mconn=NULL;
+		mc.mpool=NULL;
+		Memcached_Info *info=it2->second;
+		if (mem_fetch(info, &mc)) {
+			memcached_return_t rc = MEMCACHED_SUCCESS;
+			memcached_st *memc=mc.mconn;
+			consistency_ctx *c_ctx=&sess->c_ctx;
+			char ot[MAX_IDSIZE];
+			c_ctx->hostgroup = hid;
+			char *wk=sess->qpo->c19_wkey ? sess->qpo->c19_wkey : c_ctx->wkey;
+			if (sess->qpo->c19_wkey) { // If the write key is in a comment query we need to every time test if the token key is initialized
+				size_t kl = strlen(sess->qpo->c19_wkey);
+				rc = memcached_add_by_key(memc, sess->qpo->c19_wkey, kl, sess->qpo->c19_wkey, kl, "0", 1, (time_t)0, (uint32_t)0);
+				if (rc != MEMCACHED_SUCCESS && rc != MEMCACHED_NOTSTORED) {
+					proxy_warning("On gtid get write: error creating write context query key %s %d\n", wk, rc);
+				}
+			}
+			if (!c_ctx->rkey[0]) { // This is first call for this client connection so we need to inizialize keys
+				info->replace_placeholders(sess, c_ctx, false);
+				if (c_ctx->wkey[0]) { // if we have a write concistency key, check if token counter is initialized
+					size_t kl = strlen(c_ctx->wkey);
+					rc = memcached_add_by_key(memc, c_ctx->wkey, kl, c_ctx->wkey, kl, "0", 1, (time_t)0, (uint32_t)0);
+					if (rc != MEMCACHED_SUCCESS && rc != MEMCACHED_NOTSTORED) {
+						proxy_warning("On gtid get write: error creating write context key %s %d\n", c_ctx->wkey, rc);
+					}
+				}
+			}
+			size_t wkl = strlen(wk);
+			if ((rc = memcached_increment_by_key(memc, wk, wkl, wk, wkl, 1, &c_ctx->token)) != MEMCACHED_SUCCESS) {
+				proxy_warning("On gtid get write: error getting token %s %d\n", wk, rc);
+				ret = false;
+			} else {
+				uint64_t i = c_ctx->token > info->depth ? c_ctx->token - info->depth : 1;
+				size_t l, vl;
+				unsigned long port = 0;
+				char *ho = NULL;
+				bool running = false;
+				unsigned long long max_trx = 0;
+				char *c = NULL; 
+				uint32_t flags;
+				char *h = NULL;
+				char *g = NULL;
+				c19log("Write key is %s token is %lu\n", sess->qpo->c19_wkey, c_ctx->token);
+				for (; i <= c_ctx->token; i++ ) {
+				    l = snprintf(ot, MAX_IDSIZE - 1, "%s:%lu", wk, i);
+					h = memcached_get_by_key(memc, wk, wkl, ot, l, &vl, &flags, &rc);
+					c19log("Getting %s h is %s length is %d ret %d\n", ot, h, vl, rc);
+					if (rc != MEMCACHED_SUCCESS && rc != MEMCACHED_NOTFOUND) {
+						proxy_warning("On gtid get write: error getting memcached gtid %s %d\n", ot, rc);
+						ret = false;
+						break;
+					} else if (rc == MEMCACHED_SUCCESS) {
+						c_ctx->prev = i;
+						c = strchr(h, C19_VALUE_MARKER[0]); // Checked gtid
+						if (!c) {
+							proxy_warning("On gtid get write: error on memcached returned value last checked %s %s", ot, h);
+							ret = false;
+							break;
+						}
+						*c = 0;
+						c++;
+						g = strchr(c, C19_VALUE_MARKER[0]);
+						if (!g) { // Still running
+							if (ho) free(ho);
+							ho = h;
+							running = true;
+							break;
+						} else {
+							*g = 0;
+							g++;
+							char *e = strchr(g, C19_VALUE_MARKER[0]);
+							if (!e || strcmp(e + 1, C19_CLOSED_MARKER)) {
+								proxy_warning("On gtid get write: error on memcached returned value close marker %s %s", ot, g);
+								ret = false;
+								break;
+							}
+							*e = 0;
+							if (g[0]) {
+								char *t = strchr(g, ':');
+								if (t) {
+									unsigned long long trx = strtoull(t + 1, NULL, 10);
+									if (!ho || trx > max_trx || strcmp(h, ho)) { // if host changes we reset max_trx
+										max_trx = trx;
+										strncpy(c_ctx->gtid, g, sizeof(c_ctx->gtid) - 1);
+									} 
+								} else {
+									proxy_warning("On gtid get write: error on memcached returned value gtid %s %s", ot, g);
+									ret = false;
+									break;
+								}
+							}
+							if (ho) free(ho);
+							ho = h;
+							h = NULL;
+						}
+					} else {
+						//not found
+						break;
+					}
+				}
+				if (ret && ho) {
+					char *p = strchr(ho, ':');
+					if (!p) {
+						proxy_warning("On gtid get write: error on memcached returned value host port %s %s", ot, ho);
+						ret = false;
+					} else {
+						port = strtoul(p + 1, NULL, 10);
+						*p = 0;
+					}
+				}
+				if (ret && ho) {
+					if (!c_ctx->gtid[0] && c[0]) { // If we did not find any gtid we use last checked 
+						strncpy(c_ctx->gtid, c, sizeof(c_ctx->gtid) - 1);
+					}
+					MyHGC *myhgc=MyHGC_lookup(hid);
+					l=myhgc->mysrvs->cnt();
+					unsigned int j;
+					for (j=0; j<l; j++) {
+						MySrvC *s = myhgc->mysrvs->idx(j);
+						if (!strcmp(s->address, ho) && port == s->port) {
+							c_ctx->srv = s;
+							break;
+						}
+					}
+					if (running && !c_ctx->srv)	{
+						proxy_warning("On gtid get write: error searching host for running query %s %d", ho, port);
+						ret = false;
+					} else {
+						c_ctx->running = running;				
+					}
+				}
+				if (ho) free(ho);
+				if (h && ho != h) free(h);
+			}
+			mem_release(info, &mc);
+		}  else {
+			proxy_warning("On gtid get read: error getting memcached connection! for hostgroup %d", hid);
+			ret = false;
+		}
+	} else {
+		ret = false;
+	}
+	if (!ret) {
+		clean_gtid_ctx(&sess->c_ctx);
+	}
+	c19log("Return %d gtid %s token %lu prev %lu tunning %d\n", ret, sess->c_ctx.gtid, sess->c_ctx.token, sess->c_ctx.prev, sess->c_ctx.running);
+	return ret;
+}
+*/
+bool MySQL_HostGroups_Manager::get_write_gtid_ctx(MySQL_Session *sess, int hid) {
+	c19log("Enter %p %d\n", sess, hid);
+	bool ret = true;
+	clean_gtid_ctx(&sess->c_ctx);
+	std::map<int , Memcached_Info *>::iterator it2=Memcached_Info_Map.find(hid);
+	if (it2!=Memcached_Info_Map.end() && it2->second->writer_key) {
+		memcached_conn mc;
+		mc.mconn=NULL;
+		mc.mpool=NULL;
+		Memcached_Info *info=it2->second;
+		if (mem_fetch(info, &mc)) {
+			memcached_return_t rc = MEMCACHED_SUCCESS;
+			memcached_st *memc=mc.mconn;
+			consistency_ctx *c_ctx=&sess->c_ctx;
+			char ot[MAX_IDSIZE];
+			c_ctx->hostgroup = hid;
+			char *wk=sess->qpo->c19_wkey ? sess->qpo->c19_wkey : c_ctx->wkey;
+			if (sess->qpo->c19_wkey) { // If the write key is in a comment query we need to every time test if the token key is initialized
+				size_t kl = strlen(sess->qpo->c19_wkey);
+				rc = memcached_add_by_key(memc, sess->qpo->c19_wkey, kl, sess->qpo->c19_wkey, kl, "0", 1, (time_t)0, (uint32_t)0);
+				if (rc != MEMCACHED_SUCCESS && rc != MEMCACHED_NOTSTORED) {
+					proxy_warning("On gtid get write: error creating write context query key %s %d\n", wk, rc);
+				}
+			}
+			if (!c_ctx->rkey[0]) { // This is first call for this client connection so we need to inizialize keys
+				info->replace_placeholders(sess, c_ctx);
+				if (c_ctx->wkey[0]) { // if we have a write concistency key, check if token counter is initialized
+					size_t kl = strlen(c_ctx->wkey);
+					rc = memcached_add_by_key(memc, c_ctx->wkey, kl, c_ctx->wkey, kl, "0", 1, (time_t)0, (uint32_t)0);
+					if (rc != MEMCACHED_SUCCESS && rc != MEMCACHED_NOTSTORED) {
+						proxy_warning("On gtid get read: error creating write context key %s %d\n", c_ctx->wkey, rc);
+					}
+				}
+			}
+			size_t wkl = strlen(wk);
+			if ((rc = memcached_increment_by_key(memc, wk, wkl, wk, wkl, 1, &c_ctx->token)) != MEMCACHED_SUCCESS) {
+				proxy_warning("On gtid get write: error getting token %s %d\n", wk, rc);
+				ret = false;
+			} else {
+				uint64_t ii = c_ctx->token > info->depth ? c_ctx->token - info->depth : 1;
+				uint64_t i = c_ctx->token;
+				size_t l, vl;
+				unsigned long port = 0;
+				char *ho = NULL;
+				char *r = NULL; 
+				unsigned long long max_trx = 0;
+				char *c = NULL; 
+				uint32_t flags;
+				char *h = NULL;
+				char *g = NULL;
+				c19log("Write key is %s token is %lu\n", wk, c_ctx->token);
+				while(i >= ii) {
+				    l = snprintf(ot, MAX_IDSIZE - 1, "%s:%lu", wk, i);
+					h = memcached_get_by_key(memc, wk, wkl, ot, l, &vl, &flags, &rc);
+					c19log("Getting %s h is %s length is %d ret %d\n", ot, h, vl, rc);
+					if (rc != MEMCACHED_SUCCESS && rc != MEMCACHED_NOTFOUND) {
+						proxy_warning("On gtid get write: error getting memcached gtid %s %d\n", ot, rc);
+						ret = false;
+						break;
+					} else if (rc == MEMCACHED_SUCCESS) {
+						if (!c_ctx->prev) {
+							c_ctx->prev = i;
+						}
+						c = strchr(h, C19_VALUE_MARKER[0]); // Checked gtid
+						if (!c) {
+							proxy_warning("On gtid get write: error on memcached returned value last checked %s %s\n", ot, h);
+							ret = false;
+							break;
+						}
+						*c = 0;
+						if (ho && strcmp(h, ho)) { //If host changes we are done!
+							c19log("Host for key %s changed from %s to %s\n", ot, ho, h);
+							break;
+						}
+						if (ho) free(ho);
+						ho = h;
+						c++;
+						r = strchr(c, C19_VALUE_MARKER[0]); // Last running
+						if (!r) {
+							proxy_warning("On gtid get write: error on memcached returned value last running %s %s\n", ot, c);
+							ret = false;
+							break;
+						}
+						*r = 0;
+						r++;
+						g = strchr(r, C19_VALUE_MARKER[0]);
+						if (!c_ctx->gtid[0] && c[0]) { // If we did not find any gtid we use last checked 
+							strncpy(c_ctx->gtid, c, sizeof(c_ctx->gtid) - 1);
+						}
+						if (!g) { // Sorry! still running, we are done
+							c_ctx->running = i;
+							break;
+						} else {
+							*g = 0;
+							g++;
+							char *e = strchr(g, C19_VALUE_MARKER[0]);
+							if (!e || strcmp(e + 1, C19_CLOSED_MARKER)) {
+								proxy_warning("On gtid get write: error on memcached returned value close marker %s %s\n", ot, g);
+								ret = false;
+								break;
+							}
+							*e = 0;
+							if (g[0]) {
+								char *t = strchr(g, ':');
+								if (t) {
+									unsigned long long trx = strtoull(t + 1, NULL, 10);
+									if (trx > max_trx) { // if host changes we reset max_trx
+										max_trx = trx;
+										strncpy(c_ctx->gtid, g, sizeof(c_ctx->gtid) - 1);
+									} 
+								} else {
+									proxy_warning("On gtid get write: error on memcached returned value gtid %s %s\n", ot, g);
+									ret = false;
+									break;
+								}
+							}
+							/*
+							if (r[0]) {
+								uint64_t rr = strtoul(r, NULL, 10);
+								if (rr >= i) {
+									proxy_warning("On gtid get write: error on memcached returned value prev running wrong sequence %s counter at %lu running at %lu\n", ot, i, rr);
+									ret = false;
+									break;
+								}
+								if (rr > 0 && rr < ii) {
+									proxy_warning("On gtid get write: out of depth on memcached returned value prev running %s counter at %lu running at %lu depth limit at %lu\n", ot, i, rr, ii);
+								} else if (rr > 0) {
+									i = rr;
+									continue;
+								}
+							}
+							*/
+						}
+					} else {
+						if (c_ctx->prev > 0) {
+							proxy_warning("On gtid get write: prev running %s not found, is your ttl too short?\n", ot);
+							break;
+						}
+					}
+					i--;
+				}
+				if (ret && ho) {
+					char *p = strchr(ho, ':');
+					if (!p) {
+						proxy_warning("On gtid get write: error on memcached returned value host port %s %s\n", ot, ho);
+						ret = false;
+					} else {
+						port = strtoul(p + 1, NULL, 10);
+						*p = 0;
+					}
+				}
+				if (ret && ho) {
+					MyHGC *myhgc=MyHGC_lookup(hid);
+					l=myhgc->mysrvs->cnt();
+					unsigned int j;
+					for (j=0; j<l; j++) {
+						MySrvC *s = myhgc->mysrvs->idx(j);
+						if (!strcmp(s->address, ho) && port == s->port) {
+							c_ctx->srv = s;
+							break;
+						}
+					}
+					if (!c_ctx->srv)	{
+						proxy_warning("On gtid get write: error searching host for running query %s %d\n", ho, port);
+					}
+				}
+				if (ho) free(ho);
+				if (h && ho != h) free(h);
+			}
+			mem_release(info, &mc);
+		}  else {
+			proxy_warning("On gtid get read: error getting memcached connection! for hostgroup %d\n", hid);
+			ret = false;
+		}
+	} else {
+		ret = false;
+	}
+	if (!ret) {
+		clean_gtid_ctx(&sess->c_ctx);
+	}
+	c19log("Return %d gtid %s token %lu prev %lu running %d\n", ret, sess->c_ctx.gtid, sess->c_ctx.token, sess->c_ctx.prev, sess->c_ctx.running);
+	return ret;
+}
+
+bool MySQL_HostGroups_Manager::validate_write_gtid_ctx(MySQL_Session *sess, MySQL_Connection *myc) {
+	c19log("Enter %p %p\n", sess, myc);
+	bool ret = true;
+	std::map<int , Memcached_Info *>::iterator it2=Memcached_Info_Map.find(sess->c_ctx.hostgroup);
+	if (it2!=Memcached_Info_Map.end()) {
+		memcached_conn mc;
+		mc.mconn=NULL;
+		mc.mpool=NULL;
+		Memcached_Info *info=it2->second;
+		if (mem_fetch(info, &mc)) {
+			memcached_return_t rc = MEMCACHED_SUCCESS;
+			memcached_st *memc=mc.mconn;
+			consistency_ctx *c_ctx=&sess->c_ctx;
+			uint64_t i = c_ctx->prev + 1; // Start from the last found			
+			MySrvC *srvc = myc->parent;
+			c_ctx->srv = srvc;
+			char ot[MAX_IDSIZE];
+			char val[MAX_IDSIZE*2];
+			size_t vl = snprintf(val, MAX_IDSIZE*2 - 1, "%s:%d" C19_VALUE_MARKER "%s" C19_VALUE_MARKER "%lu", srvc->address, srvc->port, c_ctx->gtid, c_ctx->running);
+			char *v = val;
+			char *wk=sess->qpo->c19_wkey ? sess->qpo->c19_wkey : c_ctx->wkey;
+			size_t wkl = strlen(wk);
+			uint32_t flags;
+			char *p = NULL;
+			for (; i <= c_ctx->token; i++ ) {
+				int l = snprintf(ot, MAX_IDSIZE - 1, "%s:%lu", wk, i);
+				rc = memcached_add_by_key(memc, wk, wkl, ot, l, v, vl, info->ttl, (uint32_t)0);
+				c19log("Try add key %s val %s ret %d\n", ot, v, rc);
+				if (rc == MEMCACHED_NOTSTORED) {
+					if (v && v != val) {
+						free(v);
+						v = NULL;
+					}
+					v = memcached_get_by_key(memc, wk, wkl, ot, l, &vl, &flags, &rc);
+					c19log("Key already present %s val %s ret %d\n", ot, v, rc);
+					if (rc == MEMCACHED_SUCCESS) {
+						if ((p = strchr(v, C19_VALUE_MARKER[0])) && (p = strchr(p + 1, C19_VALUE_MARKER[0]))) { 
+							if ((p = strchr(p + 1, C19_VALUE_MARKER[0]))) { 
+								// Someone has already executed another query but we have to use only the running state
+								*p = 0;
+								vl = strlen(v);
+							}
+						} else {
+							proxy_warning("On gtid validate: memcached stored key invalid format %s %s\n", ot, v);
+							c_ctx->srv = NULL;
+							ret = false;
+							break;
+						}
+					} else {
+						proxy_warning("On gtid validate: error getting not stored memcached key %s %d\n", ot, rc);
+						c_ctx->srv = NULL;
+						ret = false;
+						break;
+					}
+				} else if (rc != MEMCACHED_SUCCESS) {
+					proxy_warning("On gtid validate: error adding memcached key %s %d\n", ot, rc);
+					ret = false;
+					break;
+				} else {
+					c19log("Key added %s v is %s pointer is %p val is %s pointer is %p ret %d\n", ot, v, v, val, val, rc);
+				}
+			}
+			if (ret && v != val) {
+				c19log("Someone has already executed another query, Key added %s v is %s pointer is %p val is %s pointer is %p\n", ot, v, v, val, val);
+				p = strchr(v, C19_VALUE_MARKER[0]);
+				if (p) {
+					vl = strchr(val, C19_VALUE_MARKER[0]) - val;
+					if ((p - v) != vl || memcmp(v, val, vl)) { // Server has been changed
+						c19log("Server has been changed from %s to %s\n", val, v);
+						ret = false;
+						c_ctx->srv = NULL;
+						p = strchr(v, ':');
+						if (!p) {
+							proxy_warning("On gtid get write: error on memcached returned value host port %s %s\n", ot, v);
+						} else {
+							unsigned long port = strtoul(p + 1, NULL, 10);
+							MyHGC *myhgc=MyHGC_lookup(c_ctx->hostgroup);
+							unsigned int l=myhgc->mysrvs->cnt();
+							unsigned int j;
+							*p = 0;
+							for (j=0; j<l; j++) {
+								MySrvC *s = myhgc->mysrvs->idx(j);
+								if (!strcmp(s->address, v) && port == s->port) {
+									c_ctx->srv = s;
+									break;
+								}
+							}
+							if (!c_ctx->srv) {
+								proxy_warning("On gtid validate: error searching host for running query %s %s %d\n", ot, v, port);
+							}
+						}
+					}
+				} else {
+					proxy_warning("On gtid validate: error on server comparison! for hostgroup %d %s\n", sess->c_ctx.hostgroup, v);
+					ret = false;
+				}
+			}
+			mem_release(info, &mc);
+			if (v && v != val) {
+				free(v);
+				v = NULL;
+			}
+		}  else {
+			proxy_warning("On gtid validate: error getting memcached connection! for hostgroup %d\n", sess->c_ctx.hostgroup);
+			ret = false;
+		}
+	} else {
+		proxy_warning("On gtid validate: error searching memcached hostgroup! for hostgroup %d\n", sess->c_ctx.hostgroup);
+		ret = false;
+	}
+	c19log("Return %d new node %s %d prev node %s %d\n", ret, sess->c_ctx.srv ? sess->c_ctx.srv->address : NULL, sess->c_ctx.srv ? sess->c_ctx.srv->port : 0, myc->parent->address, myc->parent->port);
+	return ret;
+}
+#endif
 

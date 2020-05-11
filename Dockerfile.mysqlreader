@@ -1,0 +1,12 @@
+FROM mysql
+LABEL Name=mysqlreader
+RUN apt-get update && apt-get install -y libboost-system-dev && apt-get install -y procps
+ADD docker/mysql/proxysql-mysqlbinlog_1.0-debian10_amd64.deb /
+RUN dpkg -i /proxysql-mysqlbinlog_1.0-debian10_amd64.deb
+
+ADD docker/mysql/readerentrypoint.sh /
+RUN chmod oug+x /readerentrypoint.sh
+ENTRYPOINT ["/readerentrypoint.sh"]
+
+EXPOSE 6020 33061
+CMD ["mysqld"]

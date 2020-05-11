@@ -7,6 +7,11 @@
 #include <thread>
 #include <iostream>
 
+#ifdef PROXYSQLC19
+#include "libmemcached/memcached.h"
+#include "libmemcached/util.h"
+#endif
+
 #include "thread.h"
 #include "wqueue.h"
 
@@ -47,7 +52,6 @@
 										  "min_lag_ms INT NOT NULL CHECK (min_lag_ms >= 0 AND min_lag_ms <= 600000) DEFAULT 30 , " \
 										  "lag_num_checks INT NOT NULL CHECK (lag_num_checks >= 1 AND lag_num_checks <= 16) DEFAULT 1 , comment VARCHAR ," \
 										  "UNIQUE (reader_hostgroup))"
-
 
 typedef std::unordered_map<std::uint64_t, void *> umap_mysql_errors;
 
@@ -261,6 +265,56 @@ class AWS_Aurora_Info {
 	~AWS_Aurora_Info();
 };
 
+#ifdef PROXYSQLC19
+#define MAX_IDSIZE 128
+#define C19_CLOSED_MARKER "#E"
+#define C19_VALUE_MARKER "|"
+#define P_USID 'S'
+#define P_WUSID 'W'
+#define P_USER 'U'
+#define P_DB 'D'
+#define P_MARKER '#'
+
+typedef struct memcached_conn
+{
+	memcached_st *mconn;
+	memcached_pool_st *mpool;
+} memcached_conn;
+
+typedef struct consistency_ctx
+{
+	int hostgroup;
+	char gtid[MAX_IDSIZE];
+	char rkey[MAX_IDSIZE/2];
+	char wkey[MAX_IDSIZE/2];
+	MySrvC *srv;
+	uint64_t running;
+	uint64_t token;
+	uint64_t prev;
+} consistency_ctx;
+
+class Memcached_Info {
+	public:
+	int hostgroup;
+	char *connection_string;
+	unsigned int depth;
+	char *reader_key;
+	char *writer_key;
+	char *comment;
+	bool active;
+	bool __active;
+	bool need_converge; // this is set to true on LOAD MYSQL SERVERS TO RUNTIME . This ensure that checks wil take an action
+	int ttl;
+	memcached_pool_st *mpool;
+	Memcached_Info(int h, char *s, int d, char *r, char *w, int t, bool _a, char *c);
+	bool update(char *s, unsigned int d, char *r, char *w, int t, bool _a, char *c);
+	bool fetch(memcached_conn *conn);
+	void release(memcached_conn *conn);
+	void replace_placeholders(MySQL_Session *sess, consistency_ctx *c_ctx, bool read = true);
+	~Memcached_Info();
+};
+#endif
+
 class MySQL_HostGroups_Manager {
 	private:
 	SQLite3DB	*admindb;
@@ -301,6 +355,13 @@ class MySQL_HostGroups_Manager {
 
 	pthread_mutex_t AWS_Aurora_Info_mutex;
 	std::map<int , AWS_Aurora_Info *> AWS_Aurora_Info_Map;
+
+#ifdef PROXYSQLC19
+	SQLite3_result *incoming_memcached_hostgroups;
+	
+	void generate_memcached_hostgroups();
+	std::map<int , Memcached_Info *> Memcached_Info_Map;
+#endif
 
 	std::thread *HGCU_thread;
 
@@ -367,6 +428,17 @@ class MySQL_HostGroups_Manager {
 	void set_incoming_group_replication_hostgroups(SQLite3_result *);
 	void set_incoming_galera_hostgroups(SQLite3_result *);
 	void set_incoming_aws_aurora_hostgroups(SQLite3_result *);
+#ifdef PROXYSQLC19	
+	void set_incoming_memcached_hostgroups(SQLite3_result *);
+	MySQL_Connection *get_MySrvConn_from_pool(MySQL_Session *, MySrvC *);
+	bool mem_fetch(Memcached_Info *info, memcached_conn *mc);
+	void mem_release(Memcached_Info *info, memcached_conn *mc);
+	void close_write_gtid_ctx(MySQL_Session *);
+	void save_gtid_ctx(MySQL_Session *, char *, MySrvC *);
+	bool get_read_gtid_ctx(MySQL_Session *, int);
+	bool get_write_gtid_ctx(MySQL_Session *, int);
+	bool validate_write_gtid_ctx(MySQL_Session *, MySQL_Connection *);
+#endif
 	SQLite3_result * execute_query(char *query, char **error);
 	SQLite3_result *dump_table_mysql_servers();
 	SQLite3_result *dump_table_mysql_replication_hostgroups();

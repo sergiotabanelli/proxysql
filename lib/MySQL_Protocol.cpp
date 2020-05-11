@@ -1397,6 +1397,20 @@ bool MySQL_Protocol::process_pkt_COM_CHANGE_USER(unsigned char *pkt, unsigned in
 	cur++;
 	user=pkt+cur;
 	cur+=strlen((const char *)user);
+#ifdef PROXYSQLC19
+	char *usid=strchr((char *)user,'#');
+	char *wusid = NULL;
+	if (usid) {
+		*usid=NULL; //It should not harm
+		usid++;
+		wusid=strchr((char *)usid,'#');
+		if (wusid) {
+			*wusid=NULL;
+			wusid++;
+		}
+	}
+#endif
+
 	cur++;
 	unsigned char pass_len=pkt[cur];
 	cur++;
@@ -1453,9 +1467,11 @@ bool MySQL_Protocol::process_pkt_COM_CHANGE_USER(unsigned char *pkt, unsigned in
 	}
 	if (userinfo->username) free(userinfo->username);
 	if (userinfo->password) free(userinfo->password);
+#ifdef PROXYSQLC19
+	userinfo->set_usid(usid ? usid : (*myds)->myconn->userinfo->usid,wusid ? wusid : (*myds)->myconn->userinfo->wusid);
+#endif
 	if (ret==true) {
 		(*myds)->DSS=STATE_CLIENT_HANDSHAKE;
-
 		userinfo->username=strdup((const char *)user);
 		userinfo->password=strdup((const char *)password);
 		if (db) userinfo->set_schemaname(db,strlen(db));
@@ -1504,6 +1520,10 @@ bool MySQL_Protocol::process_pkt_handshake_response(unsigned char *pkt, unsigned
 	bool transaction_persistent = true;
 	bool fast_forward = false;
 	int max_connections;
+#ifdef PROXYSQLC19
+	char *usid=NULL;
+	char *wusid=NULL;
+#endif
 	enum proxysql_session_type session_type = (*myds)->sess->session_type;
 
 	void *sha1_pass=NULL;
@@ -1535,6 +1555,10 @@ bool MySQL_Protocol::process_pkt_handshake_response(unsigned char *pkt, unsigned
 		pass[pass_len] = 0;
 		user = (unsigned char *)(*myds)->myconn->userinfo->username;
 		db = (*myds)->myconn->userinfo->schemaname;
+#ifdef PROXYSQLC19
+		usid = (*myds)->myconn->userinfo->usid;
+		wusid = (*myds)->myconn->userinfo->wusid;
+#endif
 		//(*myds)->switching_auth_stage=2;
 		charset=(*myds)->tmp_charset;
 		proxy_debug(PROXY_DEBUG_MYSQL_PROTOCOL,2,"Session=%p , DS=%p . Encrypted: %d , switching_auth: %d, auth_plugin_id: %d\n", (*myds)->sess, (*myds), (*myds)->encrypted, (*myds)->switching_auth_stage, auth_plugin_id);
@@ -1568,6 +1592,18 @@ bool MySQL_Protocol::process_pkt_handshake_response(unsigned char *pkt, unsigned
 //	} else {
 	user     = pkt;
 	pkt     += strlen((char *)user) + 1;
+#ifdef PROXYSQLC19
+	usid=strchr((char *)user,'#');
+	if (usid) {
+		*usid=NULL; //It should not harm
+		usid++;
+		wusid=strchr((char *)usid,'#');
+		if (wusid) {
+			*wusid=NULL;
+			wusid++;
+		}
+	}
+#endif
 
 	if (capabilities & CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA) {
 		uint64_t passlen64;
@@ -1661,6 +1697,9 @@ bool MySQL_Protocol::process_pkt_handshake_response(unsigned char *pkt, unsigned
 			proxy_debug(PROXY_DEBUG_MYSQL_AUTH, 5, "Session=%p , DS=%p , user_exists=%d , user='%s' , setting switching_auth_type=%d\n", (*myds), (*myds)->sess, user_exists, user, (*myds)->switching_auth_type);
 			generate_pkt_auth_switch_request(true, NULL, NULL);
 			(*myds)->myconn->userinfo->set((char *)user, NULL, db, NULL);
+#ifdef PROXYSQLC19
+			(*myds)->myconn->userinfo->set_usid(usid, wusid);
+#endif
 			ret = false;
 			goto __exit_process_pkt_handshake_response;
 		}
@@ -1686,6 +1725,9 @@ bool MySQL_Protocol::process_pkt_handshake_response(unsigned char *pkt, unsigned
 						(*myds)->switching_auth_stage = 1;
 						generate_pkt_auth_switch_request(true, NULL, NULL);
 						(*myds)->myconn->userinfo->set((char *)user, NULL, db, NULL);
+#ifdef PROXYSQLC19
+						(*myds)->myconn->userinfo->set_usid(usid, wusid);
+#endif
 						ret = false;
 						proxy_debug(PROXY_DEBUG_MYSQL_AUTH, 5, "Session=%p , DS=%p , user='%s' . goto __exit_process_pkt_handshake_response. User does not exist\n", (*myds), (*myds)->sess, user);
 						goto __exit_process_pkt_handshake_response;
@@ -1973,6 +2015,9 @@ __exit_do_auth:
 
 		(*myds)->myconn->options.max_allowed_pkt=max_pkt;
 		(*myds)->DSS=STATE_CLIENT_HANDSHAKE;
+#ifdef PROXYSQLC19
+		userinfo->set_usid(usid,wusid);
+#endif
 
 		if (!userinfo->username) // if set already, ignore
 			userinfo->username=strdup((const char *)user);

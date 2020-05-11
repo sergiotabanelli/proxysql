@@ -2626,6 +2626,28 @@ bool Query_Processor::query_parser_first_comment(Query_Processor_Output *qpo, ch
 					proxy_warning("Invalid gtid value=%s\n", value);
 				}
 			}
+#ifdef PROXYSQLC19			
+			if (!strcasecmp(key,"c19_key")) {
+				char *rk=value[0] == '#' ? value+1 : value;
+				char *wk=strchr(rk, '#');
+				if (wk) {
+					*wk=0;
+					wk++;
+				}
+				size_t rkl = strlen(rk);
+				char *buf=(char*)malloc(rkl+1);
+				strncpy(buf, rk, rkl);
+				qpo->c19_rkey = buf;
+				buf[rkl+1] = '\0';
+				if (wk) {
+					size_t wkl = strlen(wk);
+					buf=(char*)malloc(wkl+1);
+					strncpy(buf, wk, wkl);
+					qpo->c19_wkey = buf;
+					buf[wkl+1] = '\0';
+				}
+			}
+#endif			
 		}
 
 		proxy_debug(PROXY_DEBUG_MYSQL_QUERY_PROCESSOR, 5, "Variables in comment %s , key=%s , value=%s\n", token, key, value);

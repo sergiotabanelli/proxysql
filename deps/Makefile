@@ -15,14 +15,30 @@ else
 	CENTOSVER := Unknown
 endif
 
+NOC19 := $(shell echo $(NOC19))
+
 PROXYSQLCLICKHOUSE := $(shell echo $(PROXYSQLCLICKHOUSE))
 ifeq ($(PROXYSQLCLICKHOUSE),1)
+ifeq ($(NOC19),1)
 default: libconfig libdaemon jemalloc mariadb_client re2 sqlite3 pcre clickhouse-cpp lz4 cityhash microhttpd curl ev libssl libhttpserver libinjection
 else
+default: libconfig libdaemon jemalloc libmemcached mariadb_client re2 sqlite3 pcre clickhouse-cpp lz4 cityhash microhttpd curl ev libssl libhttpserver libinjection
+endif
+else
+ifeq ($(NOC19),1)
 default: libconfig libdaemon jemalloc mariadb_client re2 sqlite3 pcre microhttpd curl ev libssl libhttpserver libinjection
+else
+default: libconfig libdaemon jemalloc libmemcached mariadb_client re2 sqlite3 pcre microhttpd curl ev libssl libhttpserver libinjection
+endif
 endif
 .PHONY: default
 
+libmemcached/libmemcached/libmemcached/.libs/libmemcached.a:
+	cd libmemcached && rm -rf libmemcached-1.0.18 || true
+	cd libmemcached && tar -zxf libmemcached-1.0.18.tar.gz
+	cd libmemcached/libmemcached  && ./configure
+	cd libmemcached/libmemcached && CC=${CC} CXX=${CXX} ${MAKE}
+libmemcached: libmemcached/libmemcached/libmemcached/.libs/libmemcached.a
 
 libinjection/libinjection/src/libinjection.a:
 	cd libinjection && rm -rf libinjection-3.10.0 || true
@@ -186,6 +202,7 @@ cleanpart:
 .PHONY: cleanpart
 
 cleanall:
+	cd libmemcached && rm -rf libmemcached-1.0.18 || true
 	cd libinjection && rm -rf libinjection-3.10.0 || true
 	cd libhttpserver && rm -rf libhttpserver-master_20191121 || true
 	cd libdaemon && rm -rf libdaemon-0.14

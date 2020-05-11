@@ -140,6 +140,10 @@ class Query_Processor_Output {
 	int firewall_whitelist_mode;
 	char *comment; // #643
 	char *min_gtid;
+#ifdef PROXYSQLC19
+	char *c19_rkey;
+	char *c19_wkey;
+#endif
 	std::string *new_query;
 	void * operator new(size_t size) {
 		return l_alloc(size);
@@ -177,6 +181,10 @@ class Query_Processor_Output {
 		OK_msg=NULL;
 		comment=NULL; // #643
 		min_gtid=NULL;
+#ifdef PROXYSQLC19
+		c19_rkey=NULL;
+		c19_wkey=NULL;
+#endif
 		firewall_whitelist_mode = WUS_NOT_FOUND;
 	}
 	void destroy() {
@@ -192,12 +200,23 @@ class Query_Processor_Output {
 			free(min_gtid);
 			min_gtid = NULL;
 		}
+#ifdef PROXYSQLC19
+		if (c19_rkey) {
+			free(c19_rkey);
+			c19_rkey=NULL;
+		}
+		if (c19_wkey) {
+			free(c19_wkey);
+			c19_wkey=NULL;
+		}
+#endif
 		if (comment) { // #643
 			free(comment);
 		}
-		if (comment) { // #643
+// IS THIS A BUG???? IT SEEMS!!!!!	
+/*		if (comment) { // #643
 			free(comment);
-		}
+		} */
 	}
 };
 
