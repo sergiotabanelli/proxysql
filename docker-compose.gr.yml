@@ -1,7 +1,7 @@
 version: '3.7'
 services:
   mysql1:
-    image: mysqlreader
+    image: sergiotabanelli/mysqlreader
     environment:
       - MYSQL_ROOT_PASSWORD=password
     command: ["--server-id=1","--loose-group-replication-local-address=mysql1:33061","--loose-group-replication-group-seeds=mysql1:33061,mysql2:33061,mysql3:33061","--loose-group-replication-start-on-boot=ON","--loose-group-replication-bootstrap-group=ON"]
@@ -19,7 +19,7 @@ services:
         target: /etc/mysql/conf.d
         consistency: delegated
   mysql2:
-    image: mysqlreader
+    image: sergiotabanelli/mysqlreader
     environment:
       - MYSQL_ROOT_PASSWORD=password
     command: ["--server-id=2","--loose-group-replication-local-address=mysql2:33061","--loose-group-replication-group-seeds=mysql1:33061,mysql2:33061,mysql3:33061","--loose-group-replication-start-on-boot=ON"]
@@ -37,7 +37,7 @@ services:
         target: /etc/mysql/conf.d
         consistency: delegated
   mysql3:
-    image: mysqlreader
+    image: sergiotabanelli/mysqlreader
     environment:
       - MYSQL_ROOT_PASSWORD=password
     command: ["--server-id=3","--loose-group-replication-local-address=mysql3:33061","--loose-group-replication-group-seeds=mysql1:33061,mysql2:33061,mysql3:33061","--loose-group-replication-start-on-boot=ON"]
@@ -57,13 +57,12 @@ services:
   memcached:
     image: memcached
   proxysqlc19-1:
-    image: proxysqlc19
+    image: sergiotabanelli/proxysqlc19
     ports:
       - "16032:6032"
       - "16033:6033"
   proxysqlc19-2:
-    image: proxysqlc19
+    image: sergiotabanelli/proxysqlc19
     ports:
       - "26032:6032"
       - "26033:6033"
-      
