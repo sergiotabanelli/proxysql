@@ -178,7 +178,7 @@ Repeat all the above also for the other instance of ProxySQL of the `docker-comp
 mysql -u radmin -pradmin -h 127.0.0.1 -P26032
 ```
 
-We can now create the test.test table using the root MySQL user postfixed with distinct session id separated by `#` e.g. for a dummy session id 'pippo1':
+We can now create the test.test table using the root MySQL user postfixed with distinct session id separated by `#` e.g. for a dummy session id `pippo1`:
 ```
 mysql -u root#pippo1 -ppassword -h 127.0.0.1 -P16033 -e 'SHOW CREATE TABLE test.test\G'
 mysql: [Warning] Using a password on the command line interface can be insecure.
@@ -204,7 +204,7 @@ else
     echo "ERROR! FOR ID $id"
 fi
 ```
-We can also mix queries with the same MySQL root user but different dummy user session id 'pippo2': 
+We can also mix queries with the same MySQL root user but different dummy user session id `pippo2`: 
 ```
 id1=$(mysql -u root#pippo1 -ppassword -h 127.0.0.1 -P26033 -B -N -s -e "INSERT INTO test.test VALUES (NULL, uuid(), now(), 1);SELECT LAST_INSERT_ID()")
 id2=$(mysql -u root#pippo2 -ppassword -h 127.0.0.1 -P26033 -B -N -s -e "INSERT INTO test.test VALUES (NULL, uuid(), now(), 2);SELECT LAST_INSERT_ID()")
@@ -244,7 +244,7 @@ done
 ```
 ## Placeholders
 
-Here is the list of placeholders that can be used for the `read_key` and `write_key' fields of the `memcached_hostgroups` table:
+Here is the list of placeholders that can be used for the `reader_key` and `writer_key` fields of the `memcached_hostgroups` table:
 
 * `#S` is for session id passed through the MySQL connected user eg in `root#pippo` `pippo` will be the session id
 * `#U` is for the MySQL connected user eg in `root#pippo` `root` is the effective MySQL connection user
