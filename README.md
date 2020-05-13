@@ -1,276 +1,256 @@
-<a><img src="https://proxysql.com/assets/images/sm-share-default.png" alt="ProxySQL"></a>
+# ProxySQL C19 Patch: Multi-master read/write consistency enforcing in MySQL asynchronous clusters 
+>NOTE: This patch require [MySQL >= 5.7.6 with --session-track-gtids=OWN_GTID](https://dev.mysql.com/doc/refman//8.0/en/server-system-variables.html#sysvar_session_track_gtids) and at least one memcached protocol capable server, e.g. [memcached](https://memcached.org/), [couchbase](https://www.couchbase.com/) or also [mysql with the memcached plugin](https://dev.mysql.com/doc/refman/8.0/en/innodb-memcached-setup.html).
 
-Introduction	
-============	
+>BEWARE: Right now this is still only a working POC, not more!
 
-ProxySQL is a high performance, high availability, protocol aware proxy for MySQL and forks (like Percona Server and MariaDB).	
-All the while getting the unlimited freedom that comes with a GPL license.	
+>NOTE: Here is the original [README.md](./README.orig.md) from ProxySQL
 
-Its development is driven by the lack of open source proxies that provide high performance.  	
+The Idea for this patch was born in 2019 when we start thinking a convenient method to extend, to languages other than PHP, the MySQL Consistency enforcement policy implemented in our [mymysqlnd_ms](https://github.com/sergiotabanelli/mysqlnd_ms/) fork, hence, from `Consistency` and `2019`, the name `C19`. Furthermore, during Covid 19 lock down and forced quarantine this first POC has been implemented, hence, from `Covid 19`, the name `C19`. Below a short rationale and getting started.
 
-Useful links	
-===============	
+Different types of MySQL cluster solutions offer different service and data consistency levels to their users. Any asynchronous MySQL replication cluster offers eventual consistency by default. A read executed on an asynchronous slave may return current, stale or no data at all, depending on whether the slave has replayed all changesets from master or not.
+Applications using a MySQL replication cluster need to be designed to work correctly with eventual consistent data. In most cases, however, stale data is not acceptable. In those cases only certain slaves or even only master are allowed to achieve the required quality of service from the cluster.
 
-- [Official website](http://www.proxysql.com/)	
-- [Documentation](https://github.com/sysown/proxysql/wiki)
-- [DockerHub Repository](https://hub.docker.com/r/proxysql/proxysql)
-- [Benchmarks and blog posts](http://www.proxysql.blogspot.com/)	
-- [Forum](https://groups.google.com/forum/#!forum/proxysql/)	
-- [Linkedin group](https://www.linkedin.com/groups/13581070/)	
+New MySQL functionalities available in more recent versions, like [multi source replication](https://dev.mysql.com/doc/refman/5.7/en/replication-multi-source.html) or [group replication](https://dev.mysql.com/doc/refman/5.7/en/group-replication.html), allow multi-master clusters and need application strategies to avoid write conflicts and enforce write consistency for distinct write context partitions.
 
-Getting started
-===============
+The excellent [ProxySQL](https://proxysql.com) already has a [Consistent read feature](https://proxysql.com/blog/proxysql-gtid-causal-reads/) but it does not cross client connection boundaries and can't use consistency context partitions, that is: the consistency enforcement is limited to the current connection, but e.g. async web applications, where reads and writes are normaly on distinct http requests and, therefore, on distinct DB connectios, need a more complex read consistency enforcement policy. And also, `ProxySQL` does not have features for write conflicts management in multi-master asyncronous cluster scenarios. 
+The `ProxySQL C19` patch adds these features to standard `ProxySQL` and can therefore transparently choose MySQL replication nodes according to the read and write requested consistency, and this also on distinct MySQL connections and also on connections spread across multiple `ProxySQL` instances. 
 
-### Installation
-Released packages can be found here: https://github.com/sysown/proxysql/releases
+To share consistency enforcement context info, the C19 patch, use memcached. Memcached can be considered not a valid choice due to its non persistent character, indeed, if the C19 patch loose connection to the memcached servers or consistency context stored on memcached keys become unavailable, no consistency will be enforced. To partially mitigate this issue and justify the choice we could consider that:
+* Memcached is extremely fast, really easy to setup and wildly known and used
+* There are alternatives that support memcached communication protocol with various degree of persistency functionalities
+* For consistent reads, sporadic enforcement failures due to memcached unavailability, can be considered acceptable
+* For consistent writes in multi master InnoDB clusters (group replication), enforcement failures, will not lead to replication breaks but only to a transaction rollback
+* For consistent writes in multi master multi source replication cluster, enforcement failures, can lead to replication breaks, for those cases a more robust memcached protocol capable server with persistency and HA functionalities like [couchbase](https://www.couchbase.com/) is suggested
+* For future releases something like a fallback strategy could be implemented
+* For future releases memcached can also be used as shared query cache, this also considering that read consistency can be considered a perfect cache invalidation strategy, that is: every time a write occurs for that partition context, all cached queries belonging to that context could be invalidated
+* For future releases support for redis cache could be easily added
 
-Just download a package and use your systems package manager to install it:
-```bash
-wget https://github.com/sysown/proxysql/releases/download/v2.0.1/proxysql_2.0.1-ubuntu16_amd64.deb
-dpkg -i proxysql_2.0.1-ubuntu16_amd64.deb
+## Consistency context partitions
+Context partitions are sets of queries made by groups of clients (from here on 'participants') which need to share with each others the same configured isolated consistency context. With read consistency, a consistency context participant will read all writes made by other participants, itself included. With write consistency, in multi-master clusters, writes from all consistency context participants will always do not conflicts each others. Context partitions size can range from single query sent by a single client (eventual consistency) to global unique context partition which include all queries sent by all clients. Eventual consistency can indeed be considered as the smallest context partition, where every single query from every single client is a context partition. In asyncronous or semisyncronous clusters, smaller context partitions means better load distribution and performance. In `ProxySQL C19` patch context partitions are established through the use of placeholders. Placeholders are reserved tokens used in configuration values of the `memcached_hostgroups` `ProxySQL C19` table. The placeholder token will be expanded to the corresponding value at connection init, allowing consistency context establishment on a connection attribute basis (for a complete list see below). 
+
+## Read consistency
+A read context partition is a set of application reads made by a context participant that must always at least run against previous writes made by all other context participants.  
+Starting from MySQL 5.7.6 the MySQL server features the [session-track-gtids](https://dev.mysql.com/doc/refman/5.7/en/server-system-variables.html#sysvar_session_track_gtids) system variable, which, if set, will allow a client to be aware of the unique Global Transaction Identifier ([GTID](https://dev.mysql.com/doc/refman/5.7/en/replication-gtids.html)) assigned by MySQL to an executed transaction. This extremely useful feature allow clients to enforce consistency also on an application context basis, that is: a web application user normally does not need to stay perfectly in sync with writes made by another user, if userA add a record and userB add another record, there is no problem if userA does not immediately see record inserted by userB but problems arise when userA does not see his record!
+
+C19 read consistency has following rules: 
+* Reads belonging to a context partition can safely run only on cluster nodes that have already replicated all previous same context partition writes. 
+* Reads belonging to a context partition can safely run on cluster nodes that still have not replicated writes from all other contexts.
+
+For read consistency the most common scenarios is context partitioning on HTTP user session id. With [mymysqlnd_ms](https://github.com/sergiotabanelli/mysqlnd_ms/) plugin, this can be easily achieved accessing the PHP internal session id, this because the plugin is an extension of the PHP language, but for ProxySQL there is no means to directly access an http application session id. The C19 patch use a simple hack to workaround this limitation at the cost of a small and simple web application change, the hack is that every MySQL user that connect to ProxySQL C19 can have a trailing session id identifying the session id and therefore the needed read consistency context, that is: suppose that the mysql user used by your web application is `SQLmyapp`, than you can append the session id to the MySQL user separated by `#`, e.g. in PHP
+
+```
+$sqluser = 'SQLmyapp' . '#' . session_id();
+```
+The C19 patch will then strip the session id part from the connected MySQL user and use it as read context partition identifier. 
+
+Another method is to supply the session id in the query as a comment, e.g. 
+```
+$query = '/* c19_key=' . session_id() . '*/' . 'SELECT * FROM myrealquery';
+```
+This allow application users to always read them writes also if made in different connections and also if distributed on different application servers. Especially in async ajax scenarios, where reads and writes are often made on distinct http requests, user session partitioning is of great value and allow transparent migration to MySQL asyncronous clusters in almost all use cases with no or at most extremely small effort and application changes.   
+
+## Write consistency
+New MySQL functionalities like [multi source replication](https://dev.mysql.com/doc/refman/8.0/en/replication-multi-source.html) or [group replication](https://dev.mysql.com/doc/refman/8.0/en/group-replication.html) allow multi-master clusters and need application strategies to avoid write conflicts and enforce write consistency for distinct write context partitions. A write context partition is a set of application writes that, if run on distinct masters, can potentially conflict each others but that do not conflict with write sets from all other defined partitions. 
+
+It is widely known that adding masters to MySQL clusters does not scale out and does not increase write performance, that is because all masters replicate the same amount of data, so write load will be repeated on every master. However, given that other masters do not have to do the same amount of processing that the original master had to do when it originally executed the transaction, they apply the changes faster, transactions are replicated in a format that is used to apply row transformations only, without having to re-execute transactions again. There are also much more to take into account for clusters configurations, in practice distinct write queries sent to distinct masters will almost always have better total throughput then the same group of queries sent to a single master (as an example see [an overview of the Group Replication performance](https://mysqlhighavailability.com/an-overview-of-the-group-replication-performance/) multi-master peak with flow-control disabled). So the major obstacles to achieve a certain degree of writes scale-out are write conflicts and replication lag. The idea behind `mymysqlnd_ms` write consistency implementation is to move replication lag and write conflicts management to the ProxySQL balancer, that can be considered a far more easier scale-out resource. To summarize the C19 patch write consistency implementation tries to put loads on easier scalable front ends with the objective to enhance response time on much harder scalable back ends.
+
+For write consistency, scenarios strictly depend from your application requirements and can range from write context partitioning on MySQL user, the most common, to context partitioning on a user session basis as for the above explained read consistency.
+
+>BEWARE: distinct write sets partitions must not intersect each others. e.g. if a write set include all writes to table A, no other write set partition should include writes to table A.
+
+Server side write consistency has following rules: 
+* Writes belonging to distinct context partitions can safely run concurrently on distinct MySQL masters without any data conflicts and replication issues.
+* Writes belonging to the same context partition can safely run concurrently only on the same master. 
+* Writes belonging to the same context partition can safely run **NON** concurrently (there are no still pending same context writes) on any masters that has already replicated all previous same context writes.
+
+## A quick look
+
+Clone the repository, go to the cloned directory, if you want, take a quick look at `my`, `myt`, `mytt`, `myttt`, `docker-compose.gr.yml` and `proxysql.c19.sql`
+
+* the `my` script simply invoke mysql client with query passed as first parameter, user session id as second parameter and ProxySQL port prefixed with third parameter
+* the `myt` run for first parameter times a group of query of 1 insert, one select of the previous insert, 2 updates that if executed in backgroung with another `myt` execution will conflicts each other. For every single query it invokes the `my` script
+* the `mytt` runs second parameter background instances of the `myt` script each one against a distinct user session id
+* the `myttt` runs third parameter background instances of the `mytt` script each one against a distinct ProxySQL instance 
+* `docker-compose.gr.yml` runs 3 MySQL group replication nodes each one with ProxySQL binlog reader installed, 1 memcached instance and 2 ProxySQL with C19 patch instances 
+* `proxysql.c19.sql` is the sql script used to initialize ProxySQL instance according to the `docker-compose.gr.yml` running context
+
+run the docker-compose.gr.yml, wait some time until all the containers has finish the entrypoints startup, and then run:
+
+```
+mysql -u radmin -pradmin -h 127.0.0.1 -P16032 <proxysql.c19.sql
+mysql -u radmin -pradmin -h 127.0.0.1 -P26032 <proxysql.c19.sql
 ```
 
-Alternatively you can also use the available repositories:
+And then run:
 
-#### Ubuntu / Debian:
-
-Adding repository:
-```bash
-apt-get install -y lsb-release apt-transport-https
-wget -O - 'https://repo.proxysql.com/ProxySQL/repo_pub_key' | apt-key add -
-echo deb https://repo.proxysql.com/ProxySQL/proxysql-2.0.x/$(lsb_release -sc)/ ./ \
-| tee /etc/apt/sources.list.d/proxysql.list
 ```
-Note: For 1.4.x series releases use `https://repo.proxysql.com/ProxySQL/proxysql-1.4.x/$(lsb_release -sc)/ ./` instead.
-
-Installing:
-```bash
-apt-get update
-apt-get install proxysql OR apt-get install proxysql=version
+myttt 50 5 2
 ```
+you can change the first and second parameter but not third because `docker-compose.gr.yml` has only 2 instances of ProxySQL C19 patch
 
-#### Red Hat / CentOS:
+## Getting started
 
-Adding repository:
-```bash
-cat <<EOF | tee /etc/yum.repos.d/proxysql.repo
-[proxysql_repo]
-name= ProxySQL YUM repository
-baseurl=https://repo.proxysql.com/ProxySQL/proxysql-2.0.x/centos/\$releasever
-gpgcheck=1
-gpgkey=https://repo.proxysql.com/ProxySQL/repo_pub_key
-EOF
+Right now, to build the C19 patch, You must clone the repository and run the ProxySQL build steps, all PRoxySQL standard Makefile targets should work, distribution package build targets included
+
+Go to the directory where you cloned the repo (or unpacked the tarball) and run:
+
 ```
-Note: For 1.4.x series releases use `https://repo.proxysql.com/ProxySQL/proxysql-1.4.x/centos/$releasever` instead
-
-Installing:
-```bash
-yum install proxysql OR yum install proxysql-version
+make
+sudo make install
 ```
+the patch add a new table named `memcached_hostgroups` to the main ProxySQL schema:
 
-#### Amazon Linux Servers (AMI):
-
-Adding repository:
-```bash
-vi /etc/yum.repos.d/proxysql.repo
-[proxysql_repo]
-name= ProxySQL YUM repository
-baseurl=https://repo.proxysql.com/ProxySQL/proxysql-2.0.x/centos/latest
-gpgcheck=1
-gpgkey=https://repo.proxysql.com/ProxySQL/repo_pub_key
 ```
-Note: For 1.4.x series releases use `https://repo.proxysql.com/ProxySQL/proxysql-1.4.x/centos/latest` instead
+Admin>SHOW CREATE TABLE memcached_hostgroups\G
+*************************** 1. row ***************************
+       table: memcached_hostgroups
+Create Table: CREATE TABLE memcached_hostgroups (
+    hostgroup INT CHECK (hostgroup>=0) NOT NULL PRIMARY KEY,
+    connection_string VARCHAR NOT NULL, depth INT NOT NULL DEFAULT 20 CHECK (depth>0),
+    reader_key VARCHAR NOT NULL DEFAULT ('#S'),
+    writer_key VARCHAR,
+    ttl INT NOT NULL DEFAULT 3600,
+    active INT CHECK (active IN (0,1)) NOT NULL DEFAULT 1,
+    comment VARCHAR)
+1 row in set (0,00 sec)
 
-Installing:
-```bash
-yum install proxysql OR yum install proxysql-version
+```
+The most important fields are :
+
+* `hostgroup`: this field hold the id of the hostgroup for witch the read and write consistency will be enforced 
+* `connection_string`: this is the connection string used for memcached servers, format is described in [libmemcached](http://docs.libmemcached.org/libmemcached_configuration.html)
+* `depth`: this is the max number of concurrent query You expect for the write partitioned context, default is 20 
+* `reader_key`: this is the key that identify the read context partition, normally contains a placeholder (see below), default value is `#S` that is the placeholder for the user session id 
+* `writer_key`: this is the key that identify the write context partition, normally contains a placeholder (see below), it is used only if the hostgroup is multi-master and normally will be set to `#U` that is the placeholder for the MySQL connected user
+* `ttl`: this is the time to live for memcached keys, default is 3600 seconds
+
+Let's now configure taking as example the multi-master InnoDB cluster and memcached server run by `docker-compose.gr.yml` 
+
+Connect to the admin port:
+```
+mysql -u radmin -pradmin -h 127.0.0.1 -P16032
 ```
 
-### Service management
-Once the software is installed, you can use the `service` command to control the process:  
-
-#### Starting ProxySQL:
-```bash
-service proxysql start
+First we add cluster nodes all belonging to the same hostgroup, indeed this is a multi-master cluster, specifying also the gtid_port of the ProxySQL binlog reader installed on every cluster node:
 ```
-#### Stopping ProxySQL:
-```bash
-service proxysql stop
-```
+Admin>INSERT INTO "mysql_servers"(hostgroup_id,hostname,port,gtid_port) VALUES(1,'mysql1',3306,6020);
+Query OK, 1 row affected (0,03 sec)
 
-Or alternatively via the Admin interface:
-```
-$ mysql -u admin -padmin -h 127.0.0.1 -P6032 --prompt='Admin> '
-Warning: Using a password on the command line interface can be insecure.
-Welcome to the MySQL monitor.  Commands end with ; or \g.
-Your MySQL connection id is 4
-Server version: 5.5.30 (ProxySQL Admin Module)
+Admin>INSERT INTO "mysql_servers"(hostgroup_id,hostname,port,gtid_port) VALUES(1,'mysql2',3306,6020);
+Query OK, 1 row affected (0,00 sec)
 
-Copyright (c) 2000, 2016, Oracle and/or its affiliates. All rights reserved.
-
-Oracle is a registered trademark of Oracle Corporation and/or its
-affiliates. Other names may be trademarks of their respective
-owners.
-
-Type 'help;' or '\h' for help. Type '\c' to clear the current input statement.
-
-Admin> proxysql stop
+Admin>INSERT INTO "mysql_servers"(hostgroup_id,hostname,port,gtid_port) VALUES(1,'mysql3',3306,6020);
+Query OK, 1 row affected (0,00 sec)
 ```
 
-#### Restarting ProxySQL:
-```bash
-service proxysql restart
+Then we add a mecached_hostgroups record for hostgroup 1 that will enforce a read consistency partitioned by user session id and a write consistency partitioned by MySQL users
+```
+Admin>INSERT INTO "memcached_hostgroups"(hostgroup,connection_string,reader_key,writer_key) VALUES(1,'--SERVER=memcached --POOL-MIN=10 --POOL-MAX=100','#S','#U');
+Query OK, 1 row affected (0,02 sec)
 ```
 
-Or alternatively via the Admin interface:
+Then we add the user that for this example will be `root`, obviously do not use root in environment other than tests and examples containers
 ```
-$ mysql -u admin -padmin -h 127.0.0.1 -P6032 --prompt='Admin> '
-Warning: Using a password on the command line interface can be insecure.
-Welcome to the MySQL monitor.  Commands end with ; or \g.
-Your MySQL connection id is 4
-Server version: 5.5.30 (ProxySQL Admin Module)
-
-Copyright (c) 2000, 2016, Oracle and/or its affiliates. All rights reserved.
-
-Oracle is a registered trademark of Oracle Corporation and/or its
-affiliates. Other names may be trademarks of their respective
-owners.
-
-Type 'help;' or '\h' for help. Type '\c' to clear the current input statement.
-
-Admin> proxysql restart
+Admin>INSERT INTO "mysql_users"(username,password,default_hostgroup) VALUES('root','password',1);
+Query OK, 1 row affected (0,02 sec)
 ```
 
-#### Reinitializing ProxySQL from the config file (after first startup the DB file is used instead of the config file):
-```bash
-service proxysql initial
+Then we add the query rules, for this scenario we need only one, that will identify query that will need read consistency enforcement, all the others query will be assumed to need write consistency enforcement. As for standard ProxySQL the C19 patch identify read consistency query if it match a query rule with a valid `gtid_from_hostgroup` field.
+```
+Admin>INSERT INTO mysql_query_rules(rule_id,active,match_digest,destination_hostgroup,gtid_from_hostgroup,apply) VALUES(1,1,'^SELECT',1,1,1);
+Query OK, 1 row affected (0,05 sec)
 ```
 
-### Upgrades
-Just install the new package and restart ProxySQL:
-```bash
-wget https://github.com/sysown/proxysql/releases/download/v2.0.2/proxysql_2.0.2-ubuntu16_amd64.deb
-dpkg -i proxysql_2.0.2-ubuntu16_amd64.deb
-service proxysql restart
+We now load to runtime and we are done
+```
+Admin>LOAD MYSQL SERVERS TO RUNTIME;
+Query OK, 0 rows affected (0,15 sec)
+
+Admin>LOAD MYSQL USERS TO RUNTIME;
+Query OK, 0 rows affected (0,00 sec)
+
+Admin>LOAD MYSQL QUERY RULES TO RUNTIME;
+Query OK, 0 rows affected (0,03 sec)
 ```
 
-### How to check the ProxySQL version
-```bash
-$ proxysql --version
+Repeat all the above also for the other instance of ProxySQL of the `docker-compose.gr.yml` using the other admin port:
 ```
-```bash
-ProxySQL version v1.4.9-1.1, codename Truls
-```
-A debug version has `_DEBUG` in its version string.
-It is slower than non-debug version, but easier to debug in case of failures.
-```bash
-$ proxysql --version
-```
-```bash
-Main init phase0 completed in 0.000146 secs.
-ProxySQL version v1.4.9-1.1_DEBUG, codename Truls
+mysql -u radmin -pradmin -h 127.0.0.1 -P26032
 ```
 
-### Configuring ProxySQL via the `admin interface`
-
-First of all, bear in mind that the best way to configure ProxySQL is through its admin interface. This lends itself to online configuration (without having to restart the proxy) via SQL queries to its admin database. It's an effective way to configure it both manually and in an automated fashion.
-
-As a secondary way to configure it, we have the configuration file. 
-
-#### Configuring ProxySQL through the admin interface
-
-To log into the admin interface (with the default credentials) use a mysql client and connect using the following `admin` credentials locally on port (6032):
-```bash
-$ mysql -u admin -padmin -h 127.0.0.1 -P6032 --prompt='Admin> '
-Warning: Using a password on the command line interface can be insecure.
-Welcome to the MySQL monitor.  Commands end with ; or \g.
-Your MySQL connection id is 4
-Server version: 5.5.30 (ProxySQL Admin Module)
-
-Copyright (c) 2000, 2016, Oracle and/or its affiliates. All rights reserved.
-
-Oracle is a registered trademark of Oracle Corporation and/or its
-affiliates. Other names may be trademarks of their respective
-owners.
-
-Type 'help;' or '\h' for help. Type '\c' to clear the current input statement.
-
-Admin>
+We can now create the test.test table using the root MySQL user postfixed with distinct session id separated by `#` e.g. for a dummy session id 'pippo1':
+```
+mysql -u root#pippo1 -ppassword -h 127.0.0.1 -P16033 -e 'SHOW CREATE TABLE test.test\G'
+mysql: [Warning] Using a password on the command line interface can be insecure.
+*************************** 1. row ***************************
+       Table: test
+Create Table: CREATE TABLE `test` (
+  `i` bigint NOT NULL AUTO_INCREMENT,
+  `s` char(255) DEFAULT NULL,
+  `t` datetime NOT NULL,
+  `g` bigint NOT NULL,
+  PRIMARY KEY (`i`),
+  KEY `i` (`i`,`t`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8
 ```
 
-note: If your MySQL client version is version 8.04 or higher add `--default-auth=mysql_native_password` to the above command to connect to the admin interface.
-
-Once connected to the admin interface, you will have a list of databases and tables at your disposal that can be queried using the SQL language:
-```mysql
-Admin> SHOW DATABASES;
-+-----+---------+-------------------------------+
-| seq | name    | file                          |
-+-----+---------+-------------------------------+
-| 0   | main    |                               |
-| 2   | disk    | /var/lib/proxysql/proxysql.db |
-| 3   | stats   |                               |
-| 4   | monitor |                               |
-+-----+---------+-------------------------------+
-4 rows in set (0.00 sec)
+And then use it (note that queries are sent to different instances of ProxySQL, indeed use different ports): 
 ```
-This will allow you to control the list of the backend servers, how traffic is routed to them, and other important settings (such as caching, access control, etc). Once you've made modifications to the in-memory data structure, you must load the new configuration to the runtime, or persist the new settings to disk (so that they are still there after a restart of the proxy). A detailed tutorial on how to configure ProxySQL through the Admin interface is available [here](https://github.com/sysown/proxysql/wiki/ProxySQL-Configuration).
+id=$(mysql -u root#pippo1 -ppassword -h 127.0.0.1 -P26033 -B -N -s -e "INSERT INTO test.test VALUES (NULL, uuid(), now(), 1);SELECT LAST_INSERT_ID()")
+count=$(mysql -u root#pippo1 -ppassword -h 127.0.0.1 -P16033 -B -N -s -e "SELECT COUNT(*) FROM test.test WHERE i = $id")
+if [[ ${count::1} == "1" ]]; then
+    echo "OK $id"
+else
+    echo "ERROR! FOR ID $id"
+fi
+```
+We can also mix queries with the same MySQL root user but different dummy user session id 'pippo2': 
+```
+id1=$(mysql -u root#pippo1 -ppassword -h 127.0.0.1 -P26033 -B -N -s -e "INSERT INTO test.test VALUES (NULL, uuid(), now(), 1);SELECT LAST_INSERT_ID()")
+id2=$(mysql -u root#pippo2 -ppassword -h 127.0.0.1 -P26033 -B -N -s -e "INSERT INTO test.test VALUES (NULL, uuid(), now(), 2);SELECT LAST_INSERT_ID()")
+count=$(mysql -u root#pippo1 -ppassword -h 127.0.0.1 -P16033 -B -N -s -e "SELECT COUNT(*) FROM test.test WHERE i = $id1")
+if [[ ${count::1} == "1" ]]; then
+    echo "From pippo1 $id1"
+else
+    echo "From pippo1 ERROR! read enforcement not working $id1"
+fi
+count=$(mysql -u root#pippo1 -ppassword -h 127.0.0.1 -P26033 -B -N -s -e "SELECT COUNT(*) FROM test.test WHERE i = $id2")
+if [[ ${count::1} == "1" ]]; then
+    echo "From pippo1 the pippo2 insert has been replicated $id2"
+else
+    echo "From pippo1 the pippo2 insert has not been replicated $id2 but it is ok as well"
+fi
 
-#### Configuring ProxySQL through the config file
+count=$(mysql -u root#pippo2 -ppassword -h 127.0.0.1 -P16033 -B -N -s -e "SELECT COUNT(*) FROM test.test WHERE i = $id2")
+if [[ ${count::1} == "1" ]]; then
+    echo "From pippo2 $id2"
+else
+    echo "From pippo2 ERROR! read enforcement not working $id2"
+fi
+count=$(mysql -u root#pippo2 -ppassword -h 127.0.0.1 -P26033 -B -N -s -e "SELECT COUNT(*) FROM test.test WHERE i = $id1")
+if [[ ${count::1} == "1" ]]; then
+    echo "From pippo2 the pippo1 insert has been replicated $id1"
+else
+    echo "From pippo2 the pippo1 insert has not been replicated $id1 but it is ok as well"
+fi
+```
 
-Even though the config file should only be regarded as a secondary way to configure the proxy, we must not discard its value as a valid way to bootstrap a fresh ProxySQL install.
+We can also run some conflicting updates
+```
+for i in {1..10}; do
+mysql -u root#pippo2 -ppassword -h 127.0.0.1 -P16032 -B -N -s -e "UPDATE test.test SET g = g + 1 WHERE g = 1" &
+mysql -u root#pippo1 -ppassword -h 127.0.0.1 -P26032 -B -N -s -e "UPDATE test.test SET g = g - 1 WHERE g = 2" &
+done
+```
+## Placeholders
 
-Let's quickly go over the main sections of the configuration file (this overview serves as a very high level overview of ProxySQL configuration).
+Here is the list of placeholders that can be used for the `read_key` and `write_key' fields of the `memcached_hostgroups` table:
 
-Top-level sections:
-* `admin_variables`: contains global variables that control the functionality of the admin interface.
-* `mysql_variables`: contains global variables that control the functionality for handling the incoming MySQL traffic.
-* `mysql_servers`: contains rows for the `mysql_servers` table from the admin interface. Basically, these define the backend servers towards which the incoming MySQL traffic is routed. Rows are encoded as per the `.cfg` file format, here is an example:
-	
-	```bash
-	mysql_servers =
-	(
-		{
-			address="127.0.0.1"
-			port=3306
-			hostgroup=0
-			max_connections=200
-		}
-	)
-	```
-* `mysql_users`: contains rows for the `mysql_users` table from the admin interface. Basically, these define the users which can connect to the proxy, and the users with which the proxy can connect to the backend servers. Rows are encoded as per the `.cfg` file format, here is an example:
-	
-	```bash
-	mysql_users:
-	(
-		{
-			username = "root"
-			password = "root"
-			default_hostgroup = 0
-			max_connections=1000
-			default_schema="information_schema"
-			active = 1
-		}
-	)
-	```
-* `mysql_query_rules`: contains rows for the `mysql_query_rules` table from the admin interface. Basically, these define the rules used to classify and route the incoming MySQL traffic, according to various criteria (patterns matched, user used to run the query, etc.). Rows are encoded as per the `.cfg` file format, here is an example (Note: the example is a very generic query routing rule and it is recommended to create specific rules for queries rather than using a generic rule such as this):
-	
-	```bash
-	mysql_query_rules:
-	(
-		{
-			rule_id=1
-			active=1
-			match_pattern="^SELECT .* FOR UPDATE$"
-			destination_hostgroup=0
-			apply=1
-		},
-		{
-			rule_id=2
-			active=1
-			match_pattern="^SELECT"
-			destination_hostgroup=1
-			apply=1
-		}
-	)
-	```
-* top-level configuration item: `datadir`, as a string, to point to the data dir.
+* `#S` is for session id passed through the MySQL connected user eg in `root#pippo` `pippo` will be the session id
+* `#U` is for the MySQL connected user eg in `root#pippo` `root` is the effective MySQL connection user
+* `#D` is for the MySQL selected schema at connection time
+
+## Status
+
+>NOTE: This PATCH is in early development stage, if You find bugs or have any question open issue on github 
+
