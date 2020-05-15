@@ -1,5 +1,5 @@
 # ProxySQL C19 Patch: Multi-master read/write consistency enforcing in MySQL asynchronous clusters 
->NOTE: This patch require [MySQL >= 5.7.6 with --session-track-gtids=OWN_GTID](https://dev.mysql.com/doc/refman//8.0/en/server-system-variables.html#sysvar_session_track_gtids) and at least one memcached protocol capable server, e.g. [memcached](https://memcached.org/), [couchbase](https://www.couchbase.com/) or also [mysql with the memcached plugin](https://dev.mysql.com/doc/refman/8.0/en/innodb-memcached-setup.html).
+>NOTE: This patch require [MySQL >= 5.7.6 with --session-track-gtids=OWN_GTID](https://dev.mysql.com/doc/refman//8.0/en/server-system-variables.html#sysvar_session_track_gtids) and at least one memcached protocol capable server, eg [memcached](https://memcached.org/), [couchbase](https://www.couchbase.com/) or also [mysql with the memcached plugin](https://dev.mysql.com/doc/refman/8.0/en/innodb-memcached-setup.html).
 
 >BEWARE: Right now this is still only a working POC, not more!
 
@@ -12,7 +12,7 @@ Applications using a MySQL replication cluster need to be designed to work corre
 
 New MySQL functionalities available in more recent versions, like [multi source replication](https://dev.mysql.com/doc/refman/5.7/en/replication-multi-source.html) or [group replication](https://dev.mysql.com/doc/refman/5.7/en/group-replication.html), allow multi-master clusters and need application strategies to avoid write conflicts and enforce write consistency for distinct write context partitions.
 
-The excellent [ProxySQL](https://proxysql.com) already has a [Consistent read feature](https://proxysql.com/blog/proxysql-gtid-causal-reads/) but it does not cross client connection boundaries and can't use consistency context partitions, that is: the consistency enforcement is limited to the current connection, but e.g. async web applications, where reads and writes are normaly on distinct http requests and, therefore, on distinct DB connectios, need a more complex read consistency enforcement policy. And also, `ProxySQL` does not have features for write conflicts management in multi-master asyncronous cluster scenarios. 
+The excellent [ProxySQL](https://proxysql.com) already has a [Consistent read feature](https://proxysql.com/blog/proxysql-gtid-causal-reads/) but it does not cross client connection boundaries and can't use consistency context partitions, that is: the consistency enforcement is limited to the current connection, but eg async web applications, where reads and writes are normaly on distinct http requests and, therefore, on distinct DB connectios, need a more complex read consistency enforcement policy. And also, `ProxySQL` does not have features for write conflicts management in multi-master asyncronous cluster scenarios. 
 The `ProxySQL C19` patch adds these features to standard `ProxySQL` and can therefore transparently choose MySQL replication nodes according to the read and write requested consistency, and this also on distinct MySQL connections and also on connections spread across multiple `ProxySQL` instances. 
 
 To share consistency enforcement context info, the C19 patch, use memcached. Memcached can be considered not a valid choice due to its non persistent character, indeed, if the C19 patch loose connection to the memcached servers or consistency context stored on memcached keys become unavailable, no consistency will be enforced. To partially mitigate this issue and justify the choice we could consider that:
@@ -36,14 +36,14 @@ C19 read consistency has following rules:
 * Reads belonging to a context partition can safely run only on cluster nodes that have already replicated all previous same context partition writes. 
 * Reads belonging to a context partition can safely run on cluster nodes that still have not replicated writes from all other contexts.
 
-For read consistency the most common scenarios is context partitioning on HTTP user session id. With [mymysqlnd_ms](https://github.com/sergiotabanelli/mysqlnd_ms/) plugin, this can be easily achieved accessing the PHP internal session id, this because the plugin is an extension of the PHP language, but for ProxySQL there is no means to directly access an http application session id. The C19 patch use a simple hack to workaround this limitation at the cost of a small and simple web application change, the hack is that every MySQL user that connect to ProxySQL C19 can have a trailing session id identifying the session id and therefore the needed read consistency context, that is: suppose that the mysql user used by your web application is `SQLmyapp`, than you can append the session id to the MySQL user separated by `#`, e.g. in PHP
+For read consistency the most common scenarios is context partitioning on HTTP user session id. With [mymysqlnd_ms](https://github.com/sergiotabanelli/mysqlnd_ms/) plugin, this can be easily achieved accessing the PHP internal session id, this because the plugin is an extension of the PHP language, but for ProxySQL there is no means to directly access an http application session id. The C19 patch use a simple hack to workaround this limitation at the cost of a small and simple web application change, the hack is that every MySQL user that connect to ProxySQL C19 can have a trailing session id identifying the session id and therefore the needed read consistency context, that is: suppose that the mysql user used by your web application is `SQLmyapp`, than you can append the session id to the MySQL user separated by `#`, eg in PHP
 
 ```
 $sqluser = 'SQLmyapp' . '#' . session_id();
 ```
 The C19 patch will then strip the session id part from the connected MySQL user and use it as read context partition identifier. 
 
-Another method is to supply the session id in the query as a comment, e.g. 
+Another method is to supply the session id in the query as a comment, eg 
 ```
 $query = '/* c19_key=' . session_id() . '*/' . 'SELECT * FROM myrealquery';
 ```
@@ -56,7 +56,7 @@ It is widely known that adding masters to MySQL clusters does not scale out and 
 
 For write consistency, scenarios strictly depend from your application requirements and can range from write context partitioning on MySQL user, the most common, to context partitioning on a user session basis as for the above explained read consistency.
 
->BEWARE: distinct write sets partitions must not intersect each others. e.g. if a write set include all writes to table A, no other write set partition should include writes to table A.
+>BEWARE: distinct write sets partitions must not intersect each others. eg if a write set include all writes to table A, no other write set partition should include writes to table A.
 
 Server side write consistency has following rules: 
 * Writes belonging to distinct context partitions can safely run concurrently on distinct MySQL masters without any data conflicts and replication issues.
@@ -155,9 +155,9 @@ Admin>INSERT INTO "mysql_users"(username,password,default_hostgroup) VALUES('roo
 Query OK, 1 row affected (0,02 sec)
 ```
 
-Then we add the query rules, for this scenario we need only one, that will identify query that will need read consistency enforcement, all the others query will be assumed to need write consistency enforcement. As for standard ProxySQL the C19 patch identify read consistency query if it match a query rule with a valid `gtid_from_hostgroup` field.
+Then we add the query rules, for this scenario we need only one, that will identify query that will need read consistency enforcement, all the others query will be assumed to need write consistency enforcement. As for standard ProxySQL the C19 patch identify read consistency query if it match a query rule with a valid `gtid_from_hostgroup` field, we also set `multiplex` to `2` because we don't want multiplex disabled for queries with `@` in the digest.
 ```
-Admin>INSERT INTO mysql_query_rules(rule_id,active,match_digest,destination_hostgroup,gtid_from_hostgroup,apply) VALUES(1,1,'^SELECT',1,1,1);
+Admin>INSERT INTO mysql_query_rules(rule_id,active,match_digest,destination_hostgroup,multiplex,gtid_from_hostgroup,apply) VALUES(1,1,'^SELECT',1,2,1,1);
 Query OK, 1 row affected (0,05 sec)
 ```
 
@@ -178,7 +178,7 @@ Repeat all the above also for the other instance of ProxySQL of the `docker-comp
 mysql -u radmin -pradmin -h 127.0.0.1 -P26032
 ```
 
-We can now create the test.test table using the root MySQL user postfixed with distinct session id separated by `#` e.g. for a dummy session id `pippo1`:
+We can now create the test.test table using the root MySQL user postfixed with distinct session id separated by `#` eg for a dummy session id `pippo1`:
 ```
 mysql -u root#pippo1 -ppassword -h 127.0.0.1 -P16033 -e 'SHOW CREATE TABLE test.test\G'
 mysql: [Warning] Using a password on the command line interface can be insecure.

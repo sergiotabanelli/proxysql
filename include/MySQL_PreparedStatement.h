@@ -52,6 +52,9 @@ class MySQL_STMT_Global_info {
 	char *query;
 	unsigned int query_length;
 	unsigned int hostgroup_id;
+#ifdef PROXYSQLC19
+	int gtid_from_hostgroup;
+#endif
 	int ref_count_client;
 	int ref_count_server;
 	uint64_t statement_id;

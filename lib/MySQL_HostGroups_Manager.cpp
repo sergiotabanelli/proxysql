@@ -6335,6 +6335,25 @@ static void clean_gtid_ctx(consistency_ctx *c_ctx) {
 	c_ctx->running = 0;
 	c_ctx->srv = NULL;
 	c_ctx->token = 0;
+	c_ctx->gtid_from_hostgroup = 0;
+}
+
+bool MySQL_HostGroups_Manager::is_c19(MySQL_Session *sess, session_status status) {
+	bool ret = false;
+	if (status == NONE) {
+		status = sess->status;
+	}
+	c19log("Enter hostrgoup %d gtid_hostgroup %d status %d\n", sess->current_hostgroup, sess->qpo->gtid_from_hostgroup, status);
+	if ((status == PROCESSING_QUERY || status == PROCESSING_STMT_EXECUTE) && sess->locked_on_hostgroup == -1 && (!sess->mybe->server_myds->myconn || (!sess->mybe->server_myds->myconn->C19MultiplexDisabled() && !sess->mybe->server_myds->myconn->IsActiveTransaction()))) {
+		sess->c_ctx.gtid_from_hostgroup = status == PROCESSING_STMT_EXECUTE ? sess->CurrentQuery.stmt_info->gtid_from_hostgroup : sess->qpo->gtid_from_hostgroup;
+		sess->c_ctx.hostgroup = sess->mybe->hostgroup_id;
+		std::map<int , Memcached_Info *>::iterator it2=Memcached_Info_Map.find(sess->c_ctx.gtid_from_hostgroup  > 0 ? sess->c_ctx.gtid_from_hostgroup : sess->c_ctx.hostgroup);
+		if (it2!=Memcached_Info_Map.end()) {
+			ret = true;
+		}
+	}
+	c19log("Return %d\n", ret);
+	return ret;
 }
 
 void MySQL_HostGroups_Manager::close_write_gtid_ctx(MySQL_Session *sess) {
@@ -6424,7 +6443,7 @@ void MySQL_HostGroups_Manager::save_gtid_ctx(MySQL_Session *sess, char *gtid, My
 			proxy_warning("On gtid save: error getting memcached connection! for hostgroup %d\n", sess->c_ctx.hostgroup);
 		}
 	} else {
-		proxy_warning("On gtid save: error searching memcached hostgroup! for hostgroup %d\n", sess->c_ctx.hostgroup);
+		proxy_warning("On gtid save: error searching memcached hostgroup! for hostgroup %d gtid %s\n", sess->c_ctx.hostgroup, gtid);
 	}
 	clean_gtid_ctx(&sess->c_ctx);
 	c19log("Return \n");
@@ -6525,7 +6544,7 @@ bool MySQL_HostGroups_Manager::get_read_gtid_ctx(MySQL_Session *sess, int hid) {
 	c19log("Return %d gtid %s rkey %s node %s\n", ret, sess->c_ctx.gtid, sess->c_ctx.rkey, sess->c_ctx.srv ? sess->c_ctx.srv->address : "");
 	return ret;
 }
-/* This the not optimized version
+/* This the bottom up version
 bool MySQL_HostGroups_Manager::get_write_gtid_ctx(MySQL_Session *sess, int hid) {
 	c19log("Enter %p %d\n", sess, hid);
 	bool ret = true;

@@ -241,6 +241,9 @@ class MySQL_Connection {
 	bool IsServerOffline();
 	bool IsAutoCommit();
 	bool MultiplexDisabled();
+#ifdef PROXYSQLC19
+	bool C19MultiplexDisabled();
+#endif
 	bool IsKeepMultiplexEnabledVariables(char *query_digest_text);
 	void ProcessQueryAndSetStatusFlags(char *query_digest_text);
 	void optimize();

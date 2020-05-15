@@ -2076,6 +2076,34 @@ bool MySQL_Session::handler_again___verify_backend_autocommit() {
 	return false;
 }
 
+#ifdef PROXYSQLC19
+bool MySQL_Session::handler_again___verify_c19() {
+	if (!c19) {			
+		if (!mybe->server_myds->myconn->IsActiveTransaction() && MyHGM->is_c19(this)) {
+			switch(status) { // this switch can be replaced with a simple previous_status.push(status), but it is here for readibility
+				case PROCESSING_QUERY:
+					previous_status.push(PROCESSING_QUERY);
+					break;
+				case PROCESSING_STMT_PREPARE:
+					previous_status.push(PROCESSING_STMT_PREPARE);
+					break;
+				case PROCESSING_STMT_EXECUTE:
+					previous_status.push(PROCESSING_STMT_EXECUTE);
+					break;
+				default:
+					assert(0);
+					break;
+			}
+			mybe->server_myds->return_MySQL_Connection_To_Pool();
+			mybe->server_myds->fd = 0;
+			mybe->server_myds->DSS=STATE_NOT_INITIALIZED;
+			NEXT_IMMEDIATE_NEW(CONNECTING_SERVER);
+		}
+	} 
+	return false;
+}
+#endif
+
 bool MySQL_Session::handler_again___verify_backend_user_schema() {
 	MySQL_Data_Stream *myds=mybe->server_myds;
 	proxy_debug(PROXY_DEBUG_MYSQL_CONNECTION, 5, "Session %p , client: %s , backend: %s\n", this, client_myds->myconn->userinfo->username, mybe->server_myds->myconn->userinfo->username);
@@ -2757,7 +2785,6 @@ bool MySQL_Session::handler_again___status_CHANGING_SCHEMA(int *_rc) {
 
 
 bool MySQL_Session::handler_again___status_CONNECTING_SERVER(int *_rc) { 
-	//fprintf(stderr,"CONNECTING_SERVER\n");
 	if (mirror) {
 		mybe->server_myds->connect_retries_on_failure=0; // no try for mirror
 		mybe->server_myds->wait_until=thread->curtime+mysql_thread___connect_timeout_server*1000;
@@ -3374,6 +3401,7 @@ __get_pkts_from_client:
 										clock_gettime(CLOCK_THREAD_CPUTIME_ID,&begint);
 									}
 									qpo=GloQPro->process_mysql_query(this,pkt.ptr,pkt.size,&CurrentQuery);
+
 									if (qpo->max_lag_ms >= 0) {
 										thread->status_variables.queries_with_max_lag_ms++;
 									}
@@ -3817,7 +3845,7 @@ __get_pkts_from_client:
 						handler_ret = -1;
 						return handler_ret;
 						break;
-			}
+				}
 				
 				break;
 			case FAST_FORWARD:
@@ -3973,8 +4001,41 @@ handler_again:
 				}
 				NEXT_IMMEDIATE(CONNECTING_SERVER);
 			} else {
+				// C19: It seems that this 'else' use the previous selected connection excluding any load balancing, better performance at cost of a worst load distribution, 
+				// but this approach if, by one means can preserve simple read consistency, it will not work with more complex read and write consistency
+				// so we need to introduce C19 steps and eventually force a connection switch. 
 				MySQL_Data_Stream *myds=mybe->server_myds;
 				MySQL_Connection *myconn=myds->myconn;
+#ifdef PROXYSQLC19	
+				if (default_hostgroup>=0) {
+					if (!c19) {			
+						/*
+						c19log1("Go back for query %s usid %s ? locked %d multiplex disabled %d is transaction %d autoincrement delay %d qlocka %d\n", CurrentQuery.stmt_info ? CurrentQuery.stmt_info->query : CurrentQuery.get_digest_text(), client_myds->myconn->userinfo->usid, locked_on_hostgroup, mybe->server_myds->myconn->C19MultiplexDisabled(), mybe->server_myds->myconn->IsActiveTransaction(), mybe->server_myds->myconn->auto_increment_delay_token, mysql_thread___set_query_lock_on_hostgroup);
+						uint32_t status_flags = mybe->server_myds->myconn->status_flags;
+						c19log1("tran %d var %d stmt %d lockt %d temp %d lock %d nomulti %d lbin %d frows %d nobe %d\n", status_flags & STATUS_MYSQL_CONNECTION_TRANSACTION, status_flags & STATUS_MYSQL_CONNECTION_USER_VARIABLE, status_flags & STATUS_MYSQL_CONNECTION_PREPARED_STATEMENT, 
+						status_flags & STATUS_MYSQL_CONNECTION_LOCK_TABLES, status_flags & STATUS_MYSQL_CONNECTION_TEMPORARY_TABLE, status_flags & STATUS_MYSQL_CONNECTION_GET_LOCK, status_flags & STATUS_MYSQL_CONNECTION_NO_MULTIPLEX, 
+						status_flags & STATUS_MYSQL_CONNECTION_SQL_LOG_BIN0, status_flags & STATUS_MYSQL_CONNECTION_FOUND_ROWS, status_flags & STATUS_MYSQL_CONNECTION_NO_BACKSLASH_ESCAPES);
+						*/
+						if (MyHGM->is_c19(this)) { 
+							char *dig=CurrentQuery.get_digest_text();
+							if (!dig && CurrentQuery.stmt_info) {
+								dig=CurrentQuery.stmt_info->query;
+							}
+							if (!mybe->server_myds->myconn->auto_increment_delay_token || qpo->gtid_from_hostgroup <= 0 || (dig && !strcasestr(dig,"LAST_INSERT_ID") && !strcasestr(dig,"@@IDENTITY"))) { // We follow auto_increment_delay_token only for very first query and only if is a LAST_INSERT_ID
+								mybe->server_myds->return_MySQL_Connection_To_Pool();
+								mybe->server_myds->fd = 0;
+								mybe->server_myds->DSS=STATE_NOT_INITIALIZED;
+								goto handler_again;
+							}
+						}
+					} 
+/*
+					if (handler_again___verify_c19()) {
+						goto handler_again;
+					}
+*/
+				}
+#endif
 				mybe->server_myds->max_connect_time=0;
 				// we insert it in mypolls only if not already there
 				if (myds->mypolls==NULL) {
@@ -4121,6 +4182,7 @@ handler_again:
 #ifdef PROXYSQLC19
 						if (c19) {
 							MyHGM->save_gtid_ctx(this, mybe->gtid_uuid, myconn->parent);
+							c19 = false;
 						}
 #endif
 						if (mysql_thread___client_session_track_gtid) {
@@ -4129,12 +4191,12 @@ handler_again:
 						}
 					}
 #ifdef PROXYSQLC19
-					else if (c_ctx.token > 0) {
+					else if (c_ctx.token > 0 && MyHGM->is_c19(this)) {
 						if (!c19) {
 							proxy_warning("Memcached consistency on result not closed but c19 is false! something wrong! force close: %s, %d, %s, %d\n", c_ctx.srv ? c_ctx.srv->address : "", c_ctx.srv ? c_ctx.srv->port : 0, c_ctx.gtid, c_ctx.token);
 						}
-						c19log("No gtid returned close context\n");						
 						MyHGM->close_write_gtid_ctx(this);
+						c19 = false;
 					}
 #endif
 					// check if multiplexing needs to be disabled
@@ -4186,6 +4248,10 @@ handler_again:
 											stmt_info->MyComQueryCmd=CurrentQuery.MyComQueryCmd; // copy MyComQueryCmd
 										}
 									}
+#ifdef PROXYSQLC19
+								stmt_info->gtid_from_hostgroup = CurrentQuery.stmt_info ? CurrentQuery.stmt_info->gtid_from_hostgroup : qpo->gtid_from_hostgroup;
+//								c19log1("Added prepared %s gtidhg %d\n", stmt_info->digest_text, stmt_info->gtid_from_hostgroup);
+#endif									
 								global_stmtid=stmt_info->statement_id;
 								myds->myconn->local_stmts->backend_insert(global_stmtid,CurrentQuery.mysql_stmt);
 								if (previous_status.size() == 0)
@@ -4244,6 +4310,7 @@ handler_again:
 							c19log("On error close context\n");						
 							MyHGM->close_write_gtid_ctx(this);
 						}
+						c19 = false;
 #endif
 						if (myerr == 0) {
 							if (CurrentQuery.mysql_stmt) {
@@ -6496,7 +6563,10 @@ void MySQL_Session::handler___client_DSS_QUERY_SENT___server_DSS_NOT_INITIALIZED
 	uint64_t trxid = 0;
 	unsigned long long now_us = 0;
 #ifdef PROXYSQLC19
+	session_status pst = previous_status.top();
 	bool cached = false;
+//	c19log1("Enter get_connection()\n");
+	bool is_c19 = MyHGM->is_c19(this, pst);
 	c19 = false;
 	if (c_ctx.token > 0) {
 		proxy_warning("Memcached consistency not closed! something wrong! force close: %s, %d, %s, %d\n", c_ctx.srv ? c_ctx.srv->address : "", c_ctx.srv ? c_ctx.srv->port : 0, c_ctx.gtid, c_ctx.token);
@@ -6519,30 +6589,34 @@ void MySQL_Session::handler___client_DSS_QUERY_SENT___server_DSS_NOT_INITIALIZED
 	if (session_fast_forward == false) {
 		if (qpo->min_gtid) {
 			gtid_uuid = qpo->min_gtid;
-		} else if (qpo->gtid_from_hostgroup >= 0) {
+#ifdef PROXYSQLC19
+		} else if (!is_c19 && qpo->gtid_from_hostgroup >= 0) {
 			_gtid_from_backend = find_backend(qpo->gtid_from_hostgroup);
 			if (_gtid_from_backend) {
-#ifdef PROXYSQLC19
-				if ((c19 = MyHGM->get_read_gtid_ctx(this, qpo->gtid_from_hostgroup))) {
-					if (c_ctx.gtid[0]) {
-						gtid_uuid = c_ctx.gtid;
-					}
-				} else if (_gtid_from_backend->gtid_uuid[0]) {
-					gtid_uuid = _gtid_from_backend->gtid_uuid;
-				}
-#else
 				if (_gtid_from_backend->gtid_uuid[0]) {
 					gtid_uuid = _gtid_from_backend->gtid_uuid;
 				}
-#endif
 			}
-		} 
-#ifdef PROXYSQLC19
-		else if ((c19 = MyHGM->get_write_gtid_ctx(this, mybe->hostgroup_id))) {
+		} else if (is_c19 && c_ctx.gtid_from_hostgroup > 0) {
+			if ((c19 = MyHGM->get_read_gtid_ctx(this, c_ctx.gtid_from_hostgroup))) {
+				if (c_ctx.gtid[0]) {
+					gtid_uuid = c_ctx.gtid;
+				}
+			}
+		} else if (is_c19 && (c19 = MyHGM->get_write_gtid_ctx(this, c_ctx.hostgroup))) {
 			if (c_ctx.gtid[0] && !c_ctx.running) { // If there is a running query we do not use gtid
 				gtid_uuid = c_ctx.gtid;
 			}
 		}
+#else
+		} else if (qpo->gtid_from_hostgroup >= 0) {
+			_gtid_from_backend = find_backend(qpo->gtid_from_hostgroup);
+			if (_gtid_from_backend) {
+				if (_gtid_from_backend->gtid_uuid[0]) {
+					gtid_uuid = _gtid_from_backend->gtid_uuid;
+				}
+			}
+		} 
 #endif
 		char *sep_pos = NULL;
 		if (gtid_uuid != NULL) {

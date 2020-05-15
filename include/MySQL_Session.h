@@ -110,6 +110,9 @@ class MySQL_Session
 	bool handler_again___verify_init_connect();
 	bool handler_again___verify_ldap_user_variable();
 	bool handler_again___verify_backend_autocommit();
+#ifdef PROXYSQLC19
+	bool handler_again___verify_c19();
+#endif
 	bool handler_again___verify_backend_user_schema();
 	bool handler_again___verify_backend_sql_log_bin();
 	bool handler_again___verify_backend_sql_mode();

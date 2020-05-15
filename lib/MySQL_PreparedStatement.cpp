@@ -161,6 +161,9 @@ MySQL_STMT_Global_info::MySQL_STMT_Global_info(uint64_t id, unsigned int h,
 	}
 
 	is_select_NOT_for_update = false;
+#ifdef PROXYSQLC19
+	gtid_from_hostgroup = -1;
+#endif
 	{  // see bug #899 . Most of the code is borrowed from
 	   // Query_Info::is_select_NOT_for_update()
 		if (ql >= 7) {

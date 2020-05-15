@@ -291,6 +291,7 @@ typedef struct consistency_ctx
 	uint64_t running;
 	uint64_t token;
 	uint64_t prev;
+	int gtid_from_hostgroup;
 } consistency_ctx;
 
 class Memcached_Info {
@@ -438,6 +439,7 @@ class MySQL_HostGroups_Manager {
 	bool get_read_gtid_ctx(MySQL_Session *, int);
 	bool get_write_gtid_ctx(MySQL_Session *, int);
 	bool validate_write_gtid_ctx(MySQL_Session *, MySQL_Connection *);
+	bool is_c19(MySQL_Session *, session_status status = NONE);
 #endif
 	SQLite3_result * execute_query(char *query, char **error);
 	SQLite3_result *dump_table_mysql_servers();
