@@ -84,7 +84,7 @@ mysql -u radmin -pradmin -h 127.0.0.1 -P26032 <proxysql.c19.sql
 And then run:
 
 ```
-myttt 50 5 2
+./myttt 50 5 2
 ```
 you can change the first and second parameter but not third because `docker-compose.gr.yml` has only 2 instances of ProxySQL C19 patch
 
