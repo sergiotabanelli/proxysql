@@ -402,7 +402,7 @@ bool GTID_Server_Data::gtid_exists(char *gtid_uuid, uint64_t gtid_trxid) {
 	for (auto itr = it->second.begin(); itr != it->second.end(); ++itr) {
 		if ((int64_t)gtid_trxid >= itr->first && (int64_t)gtid_trxid <= itr->second) {
 //			fprintf(stderr,"YES\n");
-			c19log("node %s trxid %llu first %llu second %llu\n", address, gtid_trxid, itr->first, itr->second);
+//			c19log1("node %s trxid %llu first %llu second %llu\n", address, gtid_trxid, itr->first, itr->second);
 			return true;
 		}
 	}

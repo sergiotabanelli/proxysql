@@ -52,9 +52,9 @@ This allow application users to always read them writes also if made in differen
 ## Write consistency
 New MySQL functionalities like [multi source replication](https://dev.mysql.com/doc/refman/8.0/en/replication-multi-source.html) or [group replication](https://dev.mysql.com/doc/refman/8.0/en/group-replication.html) allow multi-master clusters and need application strategies to avoid write conflicts and enforce write consistency for distinct write context partitions. A write context partition is a set of application writes that, if run on distinct masters, can potentially conflict each others but that do not conflict with write sets from all other defined partitions. 
 
-It is widely known that adding masters to MySQL clusters does not scale out and does not increase write performance, that is because all masters replicate the same amount of data, so write load will be repeated on every master. However, given that other masters do not have to do the same amount of processing that the original master had to do when it originally executed the transaction, they apply the changes faster, transactions are replicated in a format that is used to apply row transformations only, without having to re-execute transactions again. There are also much more to take into account for clusters configurations, in practice distinct write queries sent to distinct masters will almost always have better total throughput then the same group of queries sent to a single master (as an example see [an overview of the Group Replication performance](https://mysqlhighavailability.com/an-overview-of-the-group-replication-performance/) multi-master peak with flow-control disabled). So the major obstacles to achieve a certain degree of writes scale-out are write conflicts and replication lag. The idea behind `mymysqlnd_ms` write consistency implementation is to move replication lag and write conflicts management to the ProxySQL balancer, that can be considered a far more easier scale-out resource. To summarize the C19 patch write consistency implementation tries to put loads on easier scalable front ends with the objective to enhance response time on much harder scalable back ends.
+It is widely known that adding masters to MySQL clusters does not scale out and does not increase write performance, that is because all masters replicate the same amount of data, so write load will be repeated on every master. However, given that other masters do not have to do the same amount of processing that the original master had to do when it originally executed the transaction, they apply the changes faster, transactions are replicated in a format that is used to apply row transformations only, without having to re-execute transactions again. There are also much more to take into account for clusters configurations, in practice distinct write queries sent to distinct masters will almost always have better total throughput then the same group of queries sent to a single master (as an example see [an overview of the Group Replication performance](https://mysqlhighavailability.com/an-overview-of-the-group-replication-performance/) multi-master peak with flow-control disabled). So the major obstacles to achieve a certain degree of writes scale-out are write conflicts and replication lag. The idea behind the `C19 patch` and [mymysqlnd_ms](https://github.com/sergiotabanelli/mysqlnd_ms/) fork write consistency implementation is to move replication lag and write conflicts management to the ProxySQL balancer, that can be considered a far more easier scale-out resource. To summarize the C19 patch write consistency implementation tries to put loads on easier scalable front ends with the objective to enhance response time on much harder scalable back ends.
 
-For write consistency, scenarios strictly depend from your application requirements and can range from write context partitioning on MySQL user, the most common, to context partitioning on a user session basis as for the above explained read consistency.
+For write consistency, write context partition scenarios strictly depend from your application requirements and can range from write context partitioning on MySQL user, the most common, to context partitioning on a user session basis as for the above explained read consistency.
 
 >BEWARE: distinct write sets partitions must not intersect each others. eg if a write set include all writes to table A, no other write set partition should include writes to table A.
 
@@ -124,7 +124,7 @@ The most important fields are :
 * `writer_key`: this is the key that identify the write context partition, normally contains a placeholder (see below), it is used only if the hostgroup is multi-master and normally will be set to `#U` that is the placeholder for the MySQL connected user
 * `ttl`: this is the time to live for memcached keys, default is 3600 seconds
 
-Let's now configure taking as example the multi-master InnoDB cluster and memcached server run by `docker-compose.gr.yml` 
+Let's now configure taking as example the multi-master InnoDB cluster and memcached server run by `docker-compose.gr.yml`, so run the compose file and wait until all entrypoints are executed (on my small macbook air around 30 seconds).
 
 Connect to the admin port:
 ```
@@ -148,19 +148,25 @@ Then we add a mecached_hostgroups record for hostgroup 1 that will enforce a rea
 Admin>INSERT INTO "memcached_hostgroups"(hostgroup,connection_string,reader_key,writer_key) VALUES(1,'--SERVER=memcached --POOL-MIN=10 --POOL-MAX=100','#S','#U');
 Query OK, 1 row affected (0,02 sec)
 ```
-
 Then we add the user that for this example will be `root`, obviously do not use root in environment other than tests and examples containers
 ```
 Admin>INSERT INTO "mysql_users"(username,password,default_hostgroup) VALUES('root','password',1);
 Query OK, 1 row affected (0,02 sec)
 ```
-
-Then we add the query rules, for this scenario we need only one, that will identify query that will need read consistency enforcement, all the others query will be assumed to need write consistency enforcement. As for standard ProxySQL the C19 patch identify read consistency query if it match a query rule with a valid `gtid_from_hostgroup` field, we also set `multiplex` to `2` because we don't want multiplex disabled for queries with `@` in the digest.
+Then we add the query rules, for this scenario we need one, that will identify query that will need read consistency enforcement or queries that for sure will not concurrently conflicts each other,  all the others query will be assumed to need write consistency enforcement. As for standard ProxySQL the C19 patch identify read consistency query if it match a query rule with a valid `gtid_from_hostgroup` field, we also set `multiplex` to `2` because we don't want multiplex disabled for queries with `@` in the digest.
 ```
 Admin>INSERT INTO mysql_query_rules(rule_id,active,match_digest,destination_hostgroup,multiplex,gtid_from_hostgroup,apply) VALUES(1,1,'^SELECT',1,2,1,1);
 Query OK, 1 row affected (0,05 sec)
 ```
-
+By *some means and only in some scenarios*, as for the following, also `INSERT` does not concurrently conflicts, so we add a second rule for inserts.
+```
+Admin>INSERT INTO mysql_query_rules(rule_id,active,match_digest,destination_hostgroup,multiplex,gtid_from_hostgroup,apply) VALUES(2,1,'^INSERT',1,2,1,1);
+Query OK, 1 row affected (0,05 sec)
+```
+To be sure that multiplex will not be disabled on insert we also set to `0` the global variable `mysql-auto_increment_delay_multiplex`
+```
+SET mysql-auto_increment_delay_multiplex = 0;
+```
 We now load to runtime and we are done
 ```
 Admin>LOAD MYSQL SERVERS TO RUNTIME;
@@ -171,8 +177,10 @@ Query OK, 0 rows affected (0,00 sec)
 
 Admin>LOAD MYSQL QUERY RULES TO RUNTIME;
 Query OK, 0 rows affected (0,03 sec)
-```
 
+Admin>LOAD MYSQL VARIABLES TO RUNTIME;
+Query OK, 0 rows affected (0,03 sec)
+```
 Repeat all the above also for the other instance of ProxySQL of the `docker-compose.gr.yml` using the other admin port:
 ```
 mysql -u radmin -pradmin -h 127.0.0.1 -P26032
@@ -235,13 +243,17 @@ else
 fi
 ```
 
-We can also run some conflicting updates
+We can also background run some conflicting updates
 ```
 for i in {1..10}; do
 mysql -u root#pippo2 -ppassword -h 127.0.0.1 -P16032 -B -N -s -e "UPDATE test.test SET g = g + 1 WHERE g = 1" &
+mysql -u root#pippo1 -ppassword -h 127.0.0.1 -P26032 -B -N -s -e "UPDATE test.test SET g = g - 1 WHERE g = 1" &
+mysql -u root#pippo2 -ppassword -h 127.0.0.1 -P16032 -B -N -s -e "UPDATE test.test SET g = g + 1 WHERE g = 2" &
 mysql -u root#pippo1 -ppassword -h 127.0.0.1 -P26032 -B -N -s -e "UPDATE test.test SET g = g - 1 WHERE g = 2" &
 done
 ```
+>NOTE: For the above steps as well for those from the `A quick look` section You can experience some sporadic **read** consistency errors, i lab this issue and found that it is probably related to the **push** method used by ProxySQL to collect gtid through the ProxySQL binlog reader. That is: when a gtid transaction is written to the MySQL binary log, can happen that this transaction still is not available to connections and the gtid_executed still miss that gtid. Probably this issue can be solved only changing from **push** to **pull** method for gtid_executed retrieval.
+
 ## Placeholders
 
 Here is the list of placeholders that can be used for the `reader_key` and `writer_key` fields of the `memcached_hostgroups` table:
@@ -252,5 +264,5 @@ Here is the list of placeholders that can be used for the `reader_key` and `writ
 
 ## Status
 
->NOTE: This PATCH is in early development stage, if You find bugs or have any question open issue on github 
+>NOTE: This PATCH is in early development stage, if You find bugs or have any question open issue on github. Right now the `active` field of `memcached_hostgroups` table has no effect and memcached hostgroups can be changed runtime not safely, that is: change it, save to disk and restart ProxySQL 
 
