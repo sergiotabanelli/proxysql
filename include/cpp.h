@@ -5,6 +5,9 @@
 //#include "MySQL_Data_Stream.h"
 #include "query_cache.hpp"
 #include "mysql_connection.h"
+#ifdef PROXYSQLC19
+//#include "redis_connection.h"
+#endif
 #include "sqlite3db.h"
 //#include "StatCounters.h"
 #include "MySQL_Monitor.hpp"

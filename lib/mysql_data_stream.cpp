@@ -1412,3 +1412,202 @@ bool MySQL_Data_Stream::data_in_rbio() {
 	}
 	return false;
 }
+#ifdef PROXYSQLC19
+/*
+From https://github.com/redis/hiredis/issues/313
+*/
+static redisReply *dupReplyObject(redisReply* reply) {
+	if (!reply) {
+		return NULL;
+	}
+    redisReply* r = (redisReply*)calloc(1, sizeof(*r));
+    memcpy(r, reply, sizeof(*r));
+    if(REDIS_REPLY_ERROR==reply->type || REDIS_REPLY_STRING==reply->type || REDIS_REPLY_STATUS==reply->type) //copy str
+    {
+        r->str = (char*)malloc(reply->len+1);
+        memcpy(r->str, reply->str, reply->len);
+        r->str[reply->len] = '\0';
+    }
+    else if(REDIS_REPLY_ARRAY==reply->type) //copy array
+    {
+        r->element = (redisReply**)calloc(reply->elements, sizeof(redisReply*));
+        memset(r->element, 0, r->elements*sizeof(redisReply*));
+        for(uint32_t i=0; i<reply->elements; ++i)
+        {
+            if(NULL!=reply->element[i])
+            {
+                if( NULL == (r->element[i] = dupReplyObject(reply->element[i])) )
+                {
+                    //clone child failed, free current reply, and return NULL
+                        freeReplyObject(r);
+                    return NULL;
+                }
+            }
+        }
+    }
+    return r;
+}
+
+static void redisPollAddRead(void *privdata) {
+	Redis_Connection *rc = (Redis_Connection *)privdata;
+    if (!rc->reading) {
+        rc->reading = true;
+		int i = rc->myds->mypolls->find_index(rc->ac->c.fd);
+		if (i>=0) {
+			rc->myds->mypolls->fds[i].events |= POLLIN;
+		}
+    }
+}
+
+static void redisPollDelRead(void *privdata) {
+	Redis_Connection *rc = (Redis_Connection *)privdata;
+    if (rc->reading) {
+        rc->reading = false;
+		int i = rc->myds->mypolls->find_index(rc->ac->c.fd);
+		if (i>=0) {
+			rc->myds->mypolls->fds[i].events &= ~POLLIN;
+		}
+    }
+}
+
+static void redisPollAddWrite(void *privdata) {
+	Redis_Connection *rc = (Redis_Connection *)privdata;
+    if (!rc->writing) {
+        rc->writing = true;
+		int i = rc->myds->mypolls->find_index(rc->ac->c.fd);
+		if (i>=0) {
+			rc->myds->mypolls->fds[i].events |= POLLOUT;
+		}
+    }
+}
+
+static void redisPollDelWrite(void *privdata) {
+	Redis_Connection *rc = (Redis_Connection *)privdata;
+    if (rc->writing) {
+        rc->writing = false;
+		int i = rc->myds->mypolls->find_index(rc->ac->c.fd);
+		if (i>=0) {
+			rc->myds->mypolls->fds[i].events &= ~POLLOUT;
+		}
+    }
+}
+/*
+static void redisPollCleanup(void *privdata) {
+	Redis_Connection *rc = (Redis_Connection *)privdata;
+    redisPollDelRead(privdata);
+    redisPollDelWrite(privdata);
+	if (rc->myds->rconn) {
+		rc->detach_poll();
+	}
+}
+*/
+static void reply_cb(redisAsyncContext *c, void *r, void *privdata) {
+	Redis_Connection *rc = (Redis_Connection *)privdata;
+	if (rc->status == C19_END) {
+		delete rc;
+		return;
+	}
+	if (rc->reply) {
+		proxy_warning("Something wrong reply obj not null on reply_cb\n");
+		freeReplyObject(rc->reply);
+		rc->reply = NULL;
+	}
+	if (!r) {
+		proxy_warning("Something wrong null reply on reply_cb\n");		
+	}
+    rc->reply = dupReplyObject((redisReply *)r);
+	rc->running = false;
+	rc->reading = false;
+	rc->writing = false;
+}
+
+Redis_Connection::Redis_Connection(const char *cs, MySQL_Data_Stream *ds) {
+	const char *p = strchr(cs, ':');
+	int port = 6379;
+	const char *ip = p;
+	running = false;
+	reading = false;
+	writing = false;
+	status = C19_WAIT;
+	reply = NULL;
+	if (p) {
+		port = strtoul(p + 1, NULL, 10);
+		ip = strndup(cs, p - cs);
+	}
+	
+    ac = redisAsyncConnect(ip, port);
+    if (ac->err) {
+		proxy_warning("Error on async redis connect for %s port %d error %s\n", ip, port, ac->errstr);
+    	redisAsyncDisconnect(ac);
+		ac = NULL;
+    } else {
+		myds = ds;	
+		attach_poll();
+		if (ip && ip != cs) {
+			free((void *)ip);
+		}
+	}
+}
+
+Redis_Connection::~Redis_Connection() {
+	if (reply) {
+		freeReplyObject(reply);
+	}
+	if (ac) {
+		redisAsyncDisconnect(ac);
+		if (myds->rconn) {
+			detach_poll();
+		}
+	}
+}
+
+void Redis_Connection::event_handler(int revents) {
+	if (revents==POLLIN) {
+    	redisAsyncHandleRead(ac);
+	} else if (revents==POLLOUT) {
+	    redisAsyncHandleWrite(ac);
+	} else {
+		proxy_warning("Error on poll event %d\n", revents);
+	}
+}
+
+void Redis_Connection::attach_poll() {
+	if (ac && !running && myds) {
+		myds->rconn = this;
+		myds->mypolls->add(0, ac->c.fd, myds, 0);
+		ac->ev.addRead = redisPollAddRead;
+		ac->ev.delRead = redisPollDelRead;
+		ac->ev.addWrite = redisPollAddWrite;
+		ac->ev.delWrite = redisPollDelWrite;
+//		ac->ev.cleanup = redisPollCleanup;
+		ac->ev.data = (void *)this;
+	}
+}
+
+void Redis_Connection::detach_poll() {
+	if (ac && myds) {
+		myds->rconn = NULL;
+		int i=myds->mypolls->find_index(ac->c.fd);
+		if (i>=0) {
+			myds->mypolls->remove_index_fast(i);
+		}
+	}
+}
+
+int Redis_Connection::async_command(const char *format, ...) {
+	if (ac && !running) {
+		va_list ap;
+		int status;
+		va_start(ap,format);
+		if (reply) {
+			freeReplyObject(reply);
+			reply = NULL;
+		}
+		running = true;
+    	status = redisvAsyncCommand(ac, reply_cb, this, format, ap);
+    	va_end(ap);
+    	return status;
+	}
+	return REDIS_ERR;
+}
+#endif

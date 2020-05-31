@@ -454,11 +454,11 @@ static int http_handler(void *cls, struct MHD_Connection *connection, const char
 #define ADMIN_SQLITE_TABLE_RUNTIME_MYSQL_GALERA_HOSTGROUPS "CREATE TABLE runtime_mysql_galera_hostgroups (writer_hostgroup INT CHECK (writer_hostgroup>=0) NOT NULL PRIMARY KEY , backup_writer_hostgroup INT CHECK (backup_writer_hostgroup>=0 AND backup_writer_hostgroup<>writer_hostgroup) NOT NULL , reader_hostgroup INT NOT NULL CHECK (reader_hostgroup<>writer_hostgroup AND backup_writer_hostgroup<>reader_hostgroup AND reader_hostgroup>0) , offline_hostgroup INT NOT NULL CHECK (offline_hostgroup<>writer_hostgroup AND offline_hostgroup<>reader_hostgroup AND backup_writer_hostgroup<>offline_hostgroup AND offline_hostgroup>=0) , active INT CHECK (active IN (0,1)) NOT NULL DEFAULT 1 , max_writers INT NOT NULL CHECK (max_writers >= 0) DEFAULT 1 , writer_is_also_reader INT CHECK (writer_is_also_reader IN (0,1,2)) NOT NULL DEFAULT 0 , max_transactions_behind INT CHECK (max_transactions_behind>=0) NOT NULL DEFAULT 0 , comment VARCHAR , UNIQUE (reader_hostgroup) , UNIQUE (offline_hostgroup) , UNIQUE (backup_writer_hostgroup))"
 
 #ifdef PROXYSQLC19
-// Memcached Consistency
+// C19_Info Consistency
 
-#define ADMIN_SQLITE_TABLE_MEMCACHED_HOSTGROUPS "CREATE TABLE memcached_hostgroups (hostgroup INT CHECK (hostgroup>=0) NOT NULL PRIMARY KEY , connection_string VARCHAR NOT NULL, depth INT NOT NULL DEFAULT 20 CHECK (depth>0) , reader_key VARCHAR NOT NULL DEFAULT ('#S') , writer_key VARCHAR , ttl INT NOT NULL DEFAULT 3600 , active INT CHECK (active IN (0,1)) NOT NULL DEFAULT 1 , comment VARCHAR)"
+#define ADMIN_SQLITE_TABLE_C19_HOSTGROUPS "CREATE TABLE c19_hostgroups (hostgroup INT CHECK (hostgroup>=0) NOT NULL PRIMARY KEY , connection_string VARCHAR NOT NULL, depth INT NOT NULL DEFAULT 20 CHECK (depth>0) , reader_key VARCHAR NOT NULL DEFAULT ('#S') , writer_key VARCHAR , ttl INT NOT NULL DEFAULT 3600 , active INT CHECK (active IN (0,1)) NOT NULL DEFAULT 1 , comment VARCHAR)"
 
-#define ADMIN_SQLITE_TABLE_RUNTIME_MEMCACHED_HOSTGROUPS "CREATE TABLE runtime_memcached_hostgroups (hostgroup INT CHECK (hostgroup>=0) NOT NULL PRIMARY KEY , connection_string VARCHAR NOT NULL, depth INT NOT NULL DEFAULT 20 CHECK (depth>0) , reader_key VARCHAR NOT NULL DEFAULT ('#S') , writer_key VARCHAR , ttl INT NOT NULL DEFAULT 3600 , active INT CHECK (active IN (0,1)) NOT NULL DEFAULT 1 , comment VARCHAR)"
+#define ADMIN_SQLITE_TABLE_RUNTIME_C19_HOSTGROUPS "CREATE TABLE runtime_c19_hostgroups (hostgroup INT CHECK (hostgroup>=0) NOT NULL PRIMARY KEY , connection_string VARCHAR NOT NULL, depth INT NOT NULL DEFAULT 20 CHECK (depth>0) , reader_key VARCHAR NOT NULL DEFAULT ('#S') , writer_key VARCHAR , ttl INT NOT NULL DEFAULT 3600 , active INT CHECK (active IN (0,1)) NOT NULL DEFAULT 1 , comment VARCHAR)"
 #endif
 // AWS Aurora
 
@@ -2795,7 +2795,7 @@ bool ProxySQL_Admin::GenericRefreshStatistics(const char *query_no_space, unsign
 				strstr(query_no_space,"runtime_mysql_aws_aurora_hostgroups")
 #ifdef PROXYSQLC19
 				||
-				strstr(query_no_space,"runtime_memcached_hostgroups")
+				strstr(query_no_space,"runtime_c19_hostgroups")
 #endif				
 			) {
 				runtime_mysql_servers=true; refresh=true;
@@ -3955,13 +3955,13 @@ void admin_session_handler(MySQL_Session *sess, void *_pa, PtrSize_t *pkt) {
 		}
 
 #ifdef PROXYSQLC19
-		if ((strlen(query_no_space)==strlen("CHECKSUM MEMORY MEMCACHED HOSTGROUPS") && !strncasecmp("CHECKSUM MEMORY MEMCACHED HOSTGROUPS", query_no_space, strlen(query_no_space)))
+		if ((strlen(query_no_space)==strlen("CHECKSUM MEMORY C19 HOSTGROUPS") && !strncasecmp("CHECKSUM MEMORY C19 HOSTGROUPS", query_no_space, strlen(query_no_space)))
 			||
-			(strlen(query_no_space)==strlen("CHECKSUM MEM MEMCACHED HOSTGROUPS") && !strncasecmp("CHECKSUM MEM MEMCACHED HOSTGROUPS", query_no_space, strlen(query_no_space)))
+			(strlen(query_no_space)==strlen("CHECKSUM MEM C19 HOSTGROUPS") && !strncasecmp("CHECKSUM MEM C19 HOSTGROUPS", query_no_space, strlen(query_no_space)))
 			||
-			(strlen(query_no_space)==strlen("CHECKSUM MEMCACHED HOSTGROUPS") && !strncasecmp("CHECKSUM MEMCACHED HOSTGROUPS", query_no_space, strlen(query_no_space)))){
-			char *q=(char *)"SELECT * FROM memcached_hostgroups ORDER BY hostgroup";
-			tablename=(char *)"MEMCACHED HOSTGROUPS";
+			(strlen(query_no_space)==strlen("CHECKSUM C19 HOSTGROUPS") && !strncasecmp("CHECKSUM C19 HOSTGROUPS", query_no_space, strlen(query_no_space)))){
+			char *q=(char *)"SELECT * FROM c19_hostgroups ORDER BY hostgroup";
+			tablename=(char *)"C19 HOSTGROUPS";
 			SPA->admindb->execute_statement(q, &error, &cols, &affected_rows, &resultset);
 		}
 #endif
@@ -4985,8 +4985,8 @@ bool ProxySQL_Admin::init() {
 	insert_into_tables_defs(tables_defs_admin, "restapi_routes", ADMIN_SQLITE_TABLE_RESTAPI_ROUTES);
 	insert_into_tables_defs(tables_defs_admin, "runtime_restapi_routes", ADMIN_SQLITE_TABLE_RUNTIME_RESTAPI_ROUTES);
 #ifdef PROXYSQLC19
-	insert_into_tables_defs(tables_defs_admin,"runtime_memcached_hostgroups", ADMIN_SQLITE_TABLE_RUNTIME_MEMCACHED_HOSTGROUPS);
-	insert_into_tables_defs(tables_defs_admin,"memcached_hostgroups", ADMIN_SQLITE_TABLE_MEMCACHED_HOSTGROUPS);
+	insert_into_tables_defs(tables_defs_admin,"runtime_c19_hostgroups", ADMIN_SQLITE_TABLE_RUNTIME_C19_HOSTGROUPS);
+	insert_into_tables_defs(tables_defs_admin,"c19_hostgroups", ADMIN_SQLITE_TABLE_C19_HOSTGROUPS);
 #endif	
 #ifdef DEBUG
 	insert_into_tables_defs(tables_defs_admin,"debug_levels", ADMIN_SQLITE_TABLE_DEBUG_LEVELS);
@@ -5016,7 +5016,7 @@ bool ProxySQL_Admin::init() {
 	insert_into_tables_defs(tables_defs_config,"mysql_firewall_whitelist_sqli_fingerprints", ADMIN_SQLITE_TABLE_MYSQL_FIREWALL_WHITELIST_SQLI_FINGERPRINTS);
 	insert_into_tables_defs(tables_defs_config, "restapi_routes", ADMIN_SQLITE_TABLE_RESTAPI_ROUTES);
 #ifdef PROXYSQLC19
-	insert_into_tables_defs(tables_defs_config,"memcached_hostgroups", ADMIN_SQLITE_TABLE_MEMCACHED_HOSTGROUPS);
+	insert_into_tables_defs(tables_defs_config,"c19_hostgroups", ADMIN_SQLITE_TABLE_C19_HOSTGROUPS);
 #endif	
 #ifdef DEBUG
 	insert_into_tables_defs(tables_defs_config,"debug_levels", ADMIN_SQLITE_TABLE_DEBUG_LEVELS);
@@ -8299,7 +8299,7 @@ void ProxySQL_Admin::__insert_or_ignore_maintable_select_disktable() {
 	admindb->execute("INSERT OR IGNORE INTO main.scheduler SELECT * FROM disk.scheduler");
 	admindb->execute("INSERT OR IGNORE INTO main.proxysql_servers SELECT * FROM disk.proxysql_servers");
 #ifdef PROXYSQLC19
-	admindb->execute("INSERT OR IGNORE INTO main.memcached_hostgroups SELECT * FROM disk.memcached_hostgroups");
+	admindb->execute("INSERT OR IGNORE INTO main.c19_hostgroups SELECT * FROM disk.c19_hostgroups");
 #endif
 #ifdef DEBUG
 	admindb->execute("INSERT OR IGNORE INTO main.debug_levels SELECT * FROM disk.debug_levels");
@@ -8333,7 +8333,7 @@ void ProxySQL_Admin::__insert_or_replace_maintable_select_disktable() {
 	admindb->execute("INSERT OR REPLACE INTO main.restapi_routes SELECT * FROM disk.restapi_routes");
 	admindb->execute("INSERT OR REPLACE INTO main.proxysql_servers SELECT * FROM disk.proxysql_servers");
 #ifdef PROXYSQLC19
-	admindb->execute("INSERT OR REPLACE INTO main.memcached_hostgroups SELECT * FROM disk.memcached_hostgroups");
+	admindb->execute("INSERT OR REPLACE INTO main.c19_hostgroups SELECT * FROM disk.c19_hostgroups");
 #endif
 #ifdef DEBUG
 	admindb->execute("INSERT OR REPLACE INTO main.debug_levels SELECT * FROM disk.debug_levels");
@@ -8393,7 +8393,7 @@ void ProxySQL_Admin::__insert_or_replace_disktable_select_maintable() {
 	admindb->execute("INSERT OR REPLACE INTO disk.scheduler SELECT * FROM main.scheduler");
 	admindb->execute("INSERT OR REPLACE INTO disk.proxysql_servers SELECT * FROM main.proxysql_servers");
 #ifdef PROXYSQLC19
-	admindb->execute("INSERT OR REPLACE INTO disk.memcached_hostgroups SELECT * FROM main.memcached_hostgroups");
+	admindb->execute("INSERT OR REPLACE INTO disk.c19_hostgroups SELECT * FROM main.c19_hostgroups");
 #endif
 #ifdef DEBUG
 	admindb->execute("INSERT OR REPLACE INTO disk.debug_levels SELECT * FROM main.debug_levels");
@@ -8478,7 +8478,7 @@ void ProxySQL_Admin::flush_mysql_servers__from_disk_to_memory() {
 	admindb->execute("DELETE FROM main.mysql_galera_hostgroups");
 	admindb->execute("DELETE FROM main.mysql_aws_aurora_hostgroups");
 #ifdef PROXYSQLC19
-	admindb->execute("DELETE FROM main.memcached_hostgroups");
+	admindb->execute("DELETE FROM main.c19_hostgroups");
 #endif
 	admindb->execute("INSERT INTO main.mysql_servers SELECT * FROM disk.mysql_servers");
 	admindb->execute("INSERT INTO main.mysql_replication_hostgroups SELECT * FROM disk.mysql_replication_hostgroups");
@@ -8486,7 +8486,7 @@ void ProxySQL_Admin::flush_mysql_servers__from_disk_to_memory() {
 	admindb->execute("INSERT INTO main.mysql_galera_hostgroups SELECT * FROM disk.mysql_galera_hostgroups");
 	admindb->execute("INSERT INTO main.mysql_aws_aurora_hostgroups SELECT * FROM disk.mysql_aws_aurora_hostgroups");
 #ifdef PROXYSQLC19
-	admindb->execute("INSERT INTO main.memcached_hostgroups SELECT * FROM disk.memcached_hostgroups");
+	admindb->execute("INSERT INTO main.c19_hostgroups SELECT * FROM disk.c19_hostgroups");
 #endif
 	admindb->execute("PRAGMA foreign_keys = ON");
 	admindb->wrunlock();
@@ -8501,7 +8501,7 @@ void ProxySQL_Admin::flush_mysql_servers__from_memory_to_disk() {
 	admindb->execute("DELETE FROM disk.mysql_galera_hostgroups");
 	admindb->execute("DELETE FROM disk.mysql_aws_aurora_hostgroups");
 #ifdef PROXYSQLC19
-	admindb->execute("DELETE FROM disk.memcached_hostgroups");
+	admindb->execute("DELETE FROM disk.c19_hostgroups");
 #endif
 	admindb->execute("INSERT INTO disk.mysql_servers SELECT * FROM main.mysql_servers");
 	admindb->execute("INSERT INTO disk.mysql_replication_hostgroups SELECT * FROM main.mysql_replication_hostgroups");
@@ -8509,7 +8509,7 @@ void ProxySQL_Admin::flush_mysql_servers__from_memory_to_disk() {
 	admindb->execute("INSERT INTO disk.mysql_galera_hostgroups SELECT * FROM main.mysql_galera_hostgroups");
 	admindb->execute("INSERT INTO disk.mysql_aws_aurora_hostgroups SELECT * FROM main.mysql_aws_aurora_hostgroups");
 #ifdef PROXYSQLC19
-	admindb->execute("INSERT INTO disk.memcached_hostgroups SELECT * FROM main.memcached_hostgroups");
+	admindb->execute("INSERT INTO disk.c19_hostgroups SELECT * FROM main.c19_hostgroups");
 #endif
 	admindb->execute("PRAGMA foreign_keys = ON");
 	admindb->wrunlock();
@@ -9800,7 +9800,7 @@ void ProxySQL_Admin::load_mysql_servers_to_runtime() {
 	SQLite3_result *resultset_galera=NULL;
 	SQLite3_result *resultset_aws_aurora=NULL;
 #ifdef PROXYSQLC19
-	SQLite3_result *resultset_memcached=NULL;
+	SQLite3_result *resultset_c19=NULL;
 #endif
 	char *query=(char *)"SELECT hostgroup_id,hostname,port,gtid_port,status,weight,compression,max_connections,max_replication_lag,use_ssl,max_latency_ms,comment FROM main.mysql_servers";
 	proxy_debug(PROXY_DEBUG_ADMIN, 4, "%s\n", query);
@@ -9928,16 +9928,16 @@ void ProxySQL_Admin::load_mysql_servers_to_runtime() {
 	}
 
 #ifdef PROXYSQLC19
-	// support for Memcached consistency, table memcached_hostgroups
+	// support for C19_Info consistency, table c19_hostgroups
 
-	query=(char *)"SELECT * FROM memcached_hostgroups ORDER BY hostgroup";	
+	query=(char *)"SELECT * FROM c19_hostgroups ORDER BY hostgroup";	
 	proxy_debug(PROXY_DEBUG_ADMIN, 4, "%s\n", query);
-	admindb->execute_statement(query, &error , &cols , &affected_rows , &resultset_memcached);
+	admindb->execute_statement(query, &error , &cols , &affected_rows , &resultset_c19);
 	if (error) {
 		proxy_error("Error on %s : %s\n", query, error);
 	} else {
 		// Pass the resultset to MyHGM
-		MyHGM->set_incoming_memcached_hostgroups(resultset_memcached);
+		MyHGM->set_incoming_c19_hostgroups(resultset_c19);
 	}
 #endif
 
@@ -9964,9 +9964,9 @@ void ProxySQL_Admin::load_mysql_servers_to_runtime() {
 		resultset_aws_aurora=NULL;
 	}
 #ifdef PROXYSQLC19
-	if (resultset_memcached) {
-		//delete resultset_memcached; // do not delete, resultset is stored in MyHGM
-		resultset_memcached=NULL;
+	if (resultset_c19) {
+		//delete resultset_c19; // do not delete, resultset is stored in MyHGM
+		resultset_c19=NULL;
 	}
 #endif	
 }
@@ -10629,7 +10629,7 @@ void ProxySQL_Admin::disk_upgrade_mysql_servers() {
 					      "check_timeout_ms, writer_is_also_reader, new_reader_weight, comment FROM mysql_aws_aurora_hostgroups_v208");
 	}
 #ifdef PROXYSQLC19
-	rci=configdb->check_and_build_table((char *)"memcached_hostgroups",(char *)ADMIN_SQLITE_TABLE_MEMCACHED_HOSTGROUPS);
+	rci=configdb->check_and_build_table((char *)"c19_hostgroups",(char *)ADMIN_SQLITE_TABLE_C19_HOSTGROUPS);
 #endif
 	configdb->execute("PRAGMA foreign_keys = ON");
 }

@@ -3,8 +3,41 @@
 
 #include "proxysql.h"
 #include "cpp.h"
-
 #include "MySQL_Protocol.h"
+#ifdef PROXYSQLC19
+#include "hiredis/hiredis.h"
+#include "hiredis/async.h"
+
+enum c19_status {
+	C19_WAIT,
+	C19_GET_READ,
+	C19_GET_WRITE,
+	C19_VALIDATE,
+	/* Save and Close do not really need a state
+	C19_SAVE,
+	C19_CLOSE,
+	*/
+	C19_END
+};
+
+class Redis_Connection {
+	public:
+	redisAsyncContext *ac;
+	MySQL_Data_Stream *myds;
+    redisReply *reply;
+	// TODO: too much state variables ... should be refactored!!
+    bool reading;
+	bool writing;
+    bool running;
+	enum c19_status status;
+    int async_command(const char *format, ...);
+	void attach_poll();
+	void detach_poll();
+	void event_handler(int revents);
+	Redis_Connection(const char *cs, MySQL_Data_Stream *ds);
+	~Redis_Connection();
+};
+#endif
 
 #define QUEUE_T_DEFAULT_SIZE	32768
 #define MY_SSL_BUFFER	8192
@@ -58,6 +91,9 @@ class MySQL_Data_Stream
 	enum sslstatus do_ssl_handshake();
 	void queue_encrypted_bytes(const char *buf, size_t len);
 	public:
+#ifdef PROXYSQLC19
+	Redis_Connection *rconn;
+#endif
 	void * operator new(size_t);
 	void operator delete(void *);
 

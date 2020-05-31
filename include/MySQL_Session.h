@@ -93,7 +93,9 @@ class MySQL_Session
 	bool handler___status_WAITING_CLIENT_DATA___STATE_SLEEP___MYSQL_COM_QUERY_qpo(PtrSize_t *, bool *lock_hostgroup, bool ps=false);
 
 	void handler___client_DSS_QUERY_SENT___server_DSS_NOT_INITIALIZED__get_connection();	
-
+#ifdef PROXYSQLC19
+	void handler___client_DSS_QUERY_SENT___server_DSS_NOT_INITIALIZED__get_c19_connection();	
+#endif
 	void return_proxysql_internal(PtrSize_t *);
 	bool handler_special_queries(PtrSize_t *);
 	bool handler_CommitRollback(PtrSize_t *);

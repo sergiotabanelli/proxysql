@@ -3924,43 +3924,43 @@ __mysql_thread_exit_add_mirror:
 						}
 					}
 				}
-			myds->revents=0;
-			if (myds->myds_type!=MYDS_LISTENER) {
-				if (myds->myds_type==MYDS_FRONTEND && myds->DSS==STATE_SLEEP && myds->sess && myds->sess->status==WAITING_CLIENT_DATA) {
-					myds->set_pollout();
-				} else {
-					if (myds->DSS > STATE_MARIADB_BEGIN && myds->DSS < STATE_MARIADB_END) {
-						mypolls.fds[n].events = POLLIN;
-						if (mypolls.myds[n]->myconn->async_exit_status & MYSQL_WAIT_WRITE)
-							mypolls.fds[n].events |= POLLOUT;
-					} else {
+				myds->revents=0;
+				if (myds->myds_type!=MYDS_LISTENER) {
+					if (myds->myds_type==MYDS_FRONTEND && myds->DSS==STATE_SLEEP && myds->sess && myds->sess->status==WAITING_CLIENT_DATA) {
 						myds->set_pollout();
+					} else {
+						if (myds->DSS > STATE_MARIADB_BEGIN && myds->DSS < STATE_MARIADB_END) {
+							mypolls.fds[n].events = POLLIN;
+							if (mypolls.myds[n]->myconn->async_exit_status & MYSQL_WAIT_WRITE)
+								mypolls.fds[n].events |= POLLOUT;
+						} else {
+							myds->set_pollout();
+						}
 					}
-				}
-				if (unlikely(myds->sess->pause_until > curtime)) {
-					if (myds->myds_type==MYDS_FRONTEND) {
-						myds->remove_pollout();
+					if (unlikely(myds->sess->pause_until > curtime)) {
+						if (myds->myds_type==MYDS_FRONTEND) {
+							myds->remove_pollout();
+						}
+						if (myds->myds_type==MYDS_BACKEND) {
+							if (mysql_thread___throttle_ratio_server_to_client) {
+								mypolls.fds[n].events = 0;
+							}
+						}
 					}
 					if (myds->myds_type==MYDS_BACKEND) {
-						if (mysql_thread___throttle_ratio_server_to_client) {
-							mypolls.fds[n].events = 0;
+						if (myds->sess && myds->sess->client_myds && myds->sess->mirror==false) {
+							unsigned int buffered_data=0;
+							buffered_data = myds->sess->client_myds->PSarrayOUT->len * RESULTSET_BUFLEN;
+							buffered_data += myds->sess->client_myds->resultset->len * RESULTSET_BUFLEN;
+							// we pause receiving from backend at mysql_thread___threshold_resultset_size * 8
+							// but assuming that client isn't completely blocked, we will stop checking for data
+							// only at mysql_thread___threshold_resultset_size * 4
+							if (buffered_data > (unsigned int)mysql_thread___threshold_resultset_size*4) {
+								mypolls.fds[n].events = 0;
+							}
 						}
 					}
 				}
-				if (myds->myds_type==MYDS_BACKEND) {
-					if (myds->sess && myds->sess->client_myds && myds->sess->mirror==false) {
-						unsigned int buffered_data=0;
-						buffered_data = myds->sess->client_myds->PSarrayOUT->len * RESULTSET_BUFLEN;
-						buffered_data += myds->sess->client_myds->resultset->len * RESULTSET_BUFLEN;
-						// we pause receiving from backend at mysql_thread___threshold_resultset_size * 8
-						// but assuming that client isn't completely blocked, we will stop checking for data
-						// only at mysql_thread___threshold_resultset_size * 4
-						if (buffered_data > (unsigned int)mysql_thread___threshold_resultset_size*4) {
-							mypolls.fds[n].events = 0;
-						}
-					}
-				}
-			}
 			}
 			proxy_debug(PROXY_DEBUG_NET,1,"Poll for DataStream=%p will be called with FD=%d and events=%d\n", mypolls.myds[n], mypolls.fds[n].fd, mypolls.fds[n].events);
 		}
@@ -4267,6 +4267,13 @@ __run_skip_1a:
 					proxy_error("revents==POLLNVAL for FD=%d, events=%d, MyDSFD=%d\n", mypolls.fds[n].fd, mypolls.fds[n].events, myds->fd);
 					assert(mypolls.fds[n].revents!=POLLNVAL);
 				}
+#ifdef PROXYSQLC19
+				if (myds->rconn && myds->rconn->ac && myds->rconn->ac->c.fd == mypolls.fds[n].fd) {
+					myds->rconn->event_handler(mypolls.fds[n].revents);
+					myds->sess->to_process=1;
+					continue;
+				}
+#endif			
 				switch(myds->myds_type) {
 		// Note: this logic that was here was removed completely because we added mariadb client library.
 					case MYDS_LISTENER:
@@ -4282,7 +4289,7 @@ __run_skip_1a:
 				if (rc==false) {
 					n--;
 				}
-		}
+			}
 		}
 
 #ifdef IDLE_THREADS

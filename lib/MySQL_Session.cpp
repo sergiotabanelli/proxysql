@@ -2076,34 +2076,6 @@ bool MySQL_Session::handler_again___verify_backend_autocommit() {
 	return false;
 }
 
-#ifdef PROXYSQLC19
-bool MySQL_Session::handler_again___verify_c19() {
-	if (!c19) {			
-		if (!mybe->server_myds->myconn->IsActiveTransaction() && MyHGM->is_c19(this)) {
-			switch(status) { // this switch can be replaced with a simple previous_status.push(status), but it is here for readibility
-				case PROCESSING_QUERY:
-					previous_status.push(PROCESSING_QUERY);
-					break;
-				case PROCESSING_STMT_PREPARE:
-					previous_status.push(PROCESSING_STMT_PREPARE);
-					break;
-				case PROCESSING_STMT_EXECUTE:
-					previous_status.push(PROCESSING_STMT_EXECUTE);
-					break;
-				default:
-					assert(0);
-					break;
-			}
-			mybe->server_myds->return_MySQL_Connection_To_Pool();
-			mybe->server_myds->fd = 0;
-			mybe->server_myds->DSS=STATE_NOT_INITIALIZED;
-			NEXT_IMMEDIATE_NEW(CONNECTING_SERVER);
-		}
-	} 
-	return false;
-}
-#endif
-
 bool MySQL_Session::handler_again___verify_backend_user_schema() {
 	MySQL_Data_Stream *myds=mybe->server_myds;
 	proxy_debug(PROXY_DEBUG_MYSQL_CONNECTION, 5, "Session %p , client: %s , backend: %s\n", this, client_myds->myconn->userinfo->username, mybe->server_myds->myconn->userinfo->username);
@@ -2818,19 +2790,43 @@ bool MySQL_Session::handler_again___status_CONNECTING_SERVER(int *_rc) {
 			NEXT_IMMEDIATE_NEW(WAITING_CLIENT_DATA);
 		}
 	}
+#ifdef PROXYSQLC19
+	session_status pst = previous_status.top();
+	bool is_c19 = MyHGM->is_c19(this, pst);
+	if (mybe->server_myds->myconn==NULL || (is_c19 && mybe->server_myds->rconn && mybe->server_myds->rconn->status == C19_VALIDATE)) { // In c19 consistency myconn can be not null but sill waiting for validation
+		if (session_fast_forward == false && !qpo->min_gtid && is_c19) {
+			c19 = true;
+			handler___client_DSS_QUERY_SENT___server_DSS_NOT_INITIALIZED__get_c19_connection();
+		} else {
+			handler___client_DSS_QUERY_SENT___server_DSS_NOT_INITIALIZED__get_connection();
+		}
+	}
+#else
 	if (mybe->server_myds->myconn==NULL) {
 		handler___client_DSS_QUERY_SENT___server_DSS_NOT_INITIALIZED__get_connection();
 	}
+#endif		
 	if (mybe->server_myds->myconn==NULL) {
 		if (mirror) {
 			PROXY_TRACE();
 			NEXT_IMMEDIATE_NEW(WAITING_CLIENT_DATA);
 		}		
 	}
+#ifdef PROXYSQLC19
+	if (mybe->server_myds->myconn==NULL) {
+		if (mybe->server_myds->myconn==NULL && !mybe->server_myds->rconn) { // We pause only if there is no c19 ctx, with c19 myconn null should happen only if something goes wrong or if we are fetching gtids from shared cache
+			pause_until=thread->curtime+mysql_thread___connect_retries_delay*1000;
+			*_rc=1;
+		} else {
+			*_rc=2;
+		}
+		return false;
+#else
 	if (mybe->server_myds->myconn==NULL) {
 		pause_until=thread->curtime+mysql_thread___connect_retries_delay*1000;
 		*_rc=1;
 		return false;
+#endif		
 	} else {
 		MySQL_Data_Stream *myds=mybe->server_myds;
 		MySQL_Connection *myconn=myds->myconn;
@@ -4029,11 +4025,6 @@ handler_again:
 							}
 						}
 					} 
-/*
-					if (handler_again___verify_c19()) {
-						goto handler_again;
-					}
-*/
 				}
 #endif
 				mybe->server_myds->max_connect_time=0;
@@ -4191,9 +4182,9 @@ handler_again:
 						}
 					}
 #ifdef PROXYSQLC19
-					else if (c_ctx.token > 0 && MyHGM->is_c19(this)) {
+					else if (c_ctx.tokenid[0] && MyHGM->is_c19(this)) {
 						if (!c19) {
-							proxy_warning("Memcached consistency on result not closed but c19 is false! something wrong! force close: %s, %d, %s, %d\n", c_ctx.srv ? c_ctx.srv->address : "", c_ctx.srv ? c_ctx.srv->port : 0, c_ctx.gtid, c_ctx.token);
+							proxy_warning("C19_Info consistency on result not closed but c19 is false! something wrong! force close: %s, %d, %s, %s\n", c_ctx.srv ? c_ctx.srv->address : "", c_ctx.srv ? c_ctx.srv->port : 0, c_ctx.gtid, c_ctx.tokenid);
 						}
 						MyHGM->close_write_gtid_ctx(this);
 						c19 = false;
@@ -4303,9 +4294,9 @@ handler_again:
 						int myerr=mysql_errno(myconn->mysql);
 						char *errmsg = NULL;
 #ifdef PROXYSQLC19
-						if (c_ctx.token > 0) {
+						if (c_ctx.tokenid[0]) {
 							if (!c19) {
-								proxy_warning("Memcached consistency on error not closed but c19 is false! something wrong! force close: %s, %d, %s, %d\n", c_ctx.srv ? c_ctx.srv->address : "", c_ctx.srv ? c_ctx.srv->port : 0, c_ctx.gtid, c_ctx.token);
+								proxy_warning("C19_Info consistency on error not closed but c19 is false! something wrong! force close: %s, %d, %s, %s\n", c_ctx.srv ? c_ctx.srv->address : "", c_ctx.srv ? c_ctx.srv->port : 0, c_ctx.gtid, c_ctx.tokenid);
 							}						
 							c19log("On error close context\n");						
 							MyHGM->close_write_gtid_ctx(this);
@@ -4871,6 +4862,12 @@ handler_again:
 					goto handler_again;	// we changed status
 				if (rc==1) //handler_again___status_CONNECTING_SERVER returns 1
 					goto __exit_DSS__STATE_NOT_INITIALIZED;
+#ifdef PROXYSQLC19
+				else if (rc==2) { // c19 consistency is running
+					handler_ret = 0;
+					return handler_ret;
+				}	
+#endif
 			}
 			break;
 		case NONE:
@@ -6554,6 +6551,160 @@ void MySQL_Session::handler___status_WAITING_CLIENT_DATA___STATE_SLEEP___MYSQL_C
 	}
 }
 
+#ifdef PROXYSQLC19
+void MySQL_Session::handler___client_DSS_QUERY_SENT___server_DSS_NOT_INITIALIZED__get_c19_connection() {
+	// Get a MySQL Connection
+	MySQL_Connection *mc=NULL;
+	char uuid[64];
+	char * gtid_uuid=NULL;
+	uint64_t trxid = 0;
+//	c19log1("Enter get_connection()\n");
+	if (c_ctx.tokenid[0] && (!server_myds->rconn || server_myds->rconn->status != C19_VALIDATE)) {
+		proxy_warning("C19_Info consistency not closed! something wrong! force close and skip c19: %s, %d, %s, %s\n", c_ctx.srv ? c_ctx.srv->address : "", c_ctx.srv ? c_ctx.srv->port : 0, c_ctx.gtid, c_ctx.tokenid);
+		MyHGM->close_write_gtid_ctx(this);
+		return;
+	}
+	int ret = 0;
+	if (!server_myds->rconn || server_myds->rconn->status != C19_VALIDATE) {
+		if (c_ctx.gtid_from_hostgroup > 0) {
+			if ((ret = MyHGM->get_read_gtid_ctx(this, c_ctx.gtid_from_hostgroup)) == 0) {
+				if (c_ctx.gtid[0]) {
+					gtid_uuid = c_ctx.gtid;
+				}
+			} else if (ret == -1) {
+				Redis_Connection *rc = server_myds->rconn;
+				proxy_warning("Something wrong on get read: redis conn %p status %d reply %p\n", rc, rc ? rc->status : 0, rc ? rc->reply : 0);
+				goto ear;
+			} else {
+				return; // Still running
+			}
+		} else {
+			if ((ret = MyHGM->get_write_gtid_ctx(this, c_ctx.gtid_from_hostgroup)) == 0) {
+				if (c_ctx.gtid[0] && !c_ctx.running) {
+					gtid_uuid = c_ctx.gtid;
+				}
+			} else if (ret == -1) {
+				Redis_Connection *rc = server_myds->rconn;
+				proxy_warning("Something wrong on get write: redis conn %p status %d reply %p\n", rc, rc ? rc->status : 0, rc ? rc->reply : 0);
+				goto ear;
+			} else {
+				return; // Still running
+			}
+		}
+		char *sep_pos = NULL;
+		if (gtid_uuid != NULL) {
+			sep_pos = index(gtid_uuid,':');
+			if (sep_pos == NULL) {
+				gtid_uuid = NULL; // gtid is invalid
+			}
+		}
+		bool local = false;
+		if (gtid_uuid != NULL) {
+			int l = sep_pos - gtid_uuid;
+			trxid = strtoull(sep_pos+1, NULL, 10);
+			int m;
+			int n=0;
+			for (m=0; m<l; m++) {
+				if (gtid_uuid[m] != '-') {
+					uuid[n]=gtid_uuid[m];
+					n++;
+				}
+			}
+			uuid[n]='\0';
+			mc=thread->get_MyConn_local(mybe->hostgroup_id, this, uuid, trxid, -1);
+			local = mc ? true : false;
+			if (!mc) {
+				mc=MyHGM->get_MyConn_from_pool(mybe->hostgroup_id, this, false, uuid, trxid, -1);
+			}
+			if (!mc && !c_ctx.tokenid[0]) { // if we are in write ctx we wait valitation
+				// Are we sure that the binlog reader has read all other writes and is not lagging a bit? 
+				// without lag this is an impossible condition because at least one node should have been chosen, so if we have no connection
+				// binlog is lagging a bit, so we force the node from c_ctx				
+				proxy_warning("No valid server for gtid %s! Is bin logreader lagging? fallback to %s:%d write token is %s write key is %s read key is %s last running is %lu\n", gtid_uuid, c_ctx.srv->address, c_ctx.srv->port, c_ctx.tokenid, c_ctx.wkey, c_ctx.rkey, c_ctx.running);
+				mc=thread->get_MySrvConn_local(this, c_ctx.srv);
+				local = mc ? true : false;
+				if (!mc) {
+					mc=MyHGM->get_MySrvConn_from_pool(this, c_ctx.srv);
+				}
+			}
+		} else if (!c_ctx.running) { 
+			mc=thread->get_MyConn_local(mybe->hostgroup_id, this, NULL, 0, (int)qpo->max_lag_ms);
+			local = mc ? true : false;
+			if (!mc) {
+				mc=MyHGM->get_MyConn_from_pool(mybe->hostgroup_id, this, false, NULL, 0, (int)qpo->max_lag_ms);
+			}
+		}
+		if (mc && c_ctx.tokenid[0]) { // If we are in write ctx we release connection to poll or local thread
+			c_ctx.srv = mc->parent; // First save choosen server to ctx
+			if (local) {
+				thread->push_MyConn_local(mc);
+			} else {
+				MyHGM->push_MyConn_to_pool(mc);
+			}
+			mc = NULL;
+		} else if (mc && local) {
+			thread->status_variables.ConnPool_get_conn_immediate++;
+		}
+	}
+	if (c_ctx.tokenid[0]) { // if we are in write consistency we need to validate choosen server
+		if ((ret = MyHGM->validate_write_gtid_ctx(this)) == 0) {
+			mc=thread->get_MySrvConn_local(this, c_ctx.srv);
+			if (!mc) {
+				mc=MyHGM->get_MySrvConn_from_pool(this, c_ctx.srv);
+			} else {
+				thread->status_variables.ConnPool_get_conn_immediate++;
+			}
+		} else if (ret == -1) {
+			Redis_Connection *rc = server_myds->rconn;
+			proxy_warning("Something wrong on validate: redis conn %p status %d reply %p\n", rc, rc ? rc->status : 0, rc ? rc->reply : 0);
+		} else {
+			return; // Still running
+		}
+	}
+ear: //End And Return
+	if (mc) {
+		mybe->server_myds->attach_connection(mc);
+		thread->status_variables.ConnPool_get_conn_success++;
+	} else {
+		thread->status_variables.ConnPool_get_conn_failure++;
+	}
+	if (mybe->server_myds->myconn==NULL) {
+		// we couldn't get a connection for whatever reason, ex: no backends, or too busy
+		if (thread->mypolls.poll_timeout==0) { // tune poll timeout
+				thread->mypolls.poll_timeout = mysql_thread___poll_timeout_on_failure * 1000;
+				proxy_debug(PROXY_DEBUG_MYSQL_CONNECTION, 7, "Session=%p , DS=%p , poll_timeout=%llu\n", mybe->server_myds, thread->mypolls.poll_timeout);
+		} else {
+			if (thread->mypolls.poll_timeout > (unsigned int)mysql_thread___poll_timeout_on_failure * 1000) {
+				thread->mypolls.poll_timeout = mysql_thread___poll_timeout_on_failure * 1000;
+				proxy_debug(PROXY_DEBUG_MYSQL_CONNECTION, 7, "Session=%p , DS=%p , poll_timeout=%llu\n", mybe->server_myds, thread->mypolls.poll_timeout);
+			}
+		}
+		return;
+	}
+	if (mybe->server_myds->myconn->fd==-1) {
+		// we didn't get a valid connection, we need to create one
+		proxy_debug(PROXY_DEBUG_MYSQL_CONNECTION, 5, "Sess=%p -- MySQL Connection has no FD\n", this);
+		MySQL_Connection *myconn=mybe->server_myds->myconn;
+		myconn->userinfo->set(client_myds->myconn->userinfo);
+
+		myconn->handler(0);
+		mybe->server_myds->fd=myconn->fd;
+		mybe->server_myds->DSS=STATE_MARIADB_CONNECTING;
+		status=CONNECTING_SERVER;
+		mybe->server_myds->myconn->reusable=true;
+	} else {
+		proxy_debug(PROXY_DEBUG_MYSQL_CONNECTION, 5, "Sess=%p -- MySQL Connection found = %p\n", this, mybe->server_myds->myconn);
+		mybe->server_myds->assign_fd_from_mysql_conn();
+		mybe->server_myds->myds_type=MYDS_BACKEND;
+		mybe->server_myds->DSS=STATE_READY;
+		if (session_fast_forward==true) {
+			status=FAST_FORWARD;
+			mybe->server_myds->myconn->reusable=false; // the connection cannot be usable anymore
+		}
+	}
+}
+#endif
+
 void MySQL_Session::handler___client_DSS_QUERY_SENT___server_DSS_NOT_INITIALIZED__get_connection() {
 	// Get a MySQL Connection
 	MySQL_Connection *mc=NULL;
@@ -6564,15 +6715,11 @@ void MySQL_Session::handler___client_DSS_QUERY_SENT___server_DSS_NOT_INITIALIZED
 	unsigned long long now_us = 0;
 #ifdef PROXYSQLC19
 	session_status pst = previous_status.top();
-	bool cached = false;
 //	c19log1("Enter get_connection()\n");
-	bool is_c19 = MyHGM->is_c19(this, pst);
-	c19 = false;
-	if (c_ctx.token > 0) {
-		proxy_warning("Memcached consistency not closed! something wrong! force close: %s, %d, %s, %d\n", c_ctx.srv ? c_ctx.srv->address : "", c_ctx.srv ? c_ctx.srv->port : 0, c_ctx.gtid, c_ctx.token);
+	if (c_ctx.tokenid[0]) {
+		proxy_warning("C19_Info consistency not closed! something wrong! force close: %s, %d, %s, %s\n", c_ctx.srv ? c_ctx.srv->address : "", c_ctx.srv ? c_ctx.srv->port : 0, c_ctx.gtid, c_ctx.tokenid);
 		MyHGM->close_write_gtid_ctx(this);
 	}
-//		memset(&c_ctx,0,sizeof(c_ctx));
 #endif
 	if (qpo->max_lag_ms >= 0) {
 		if (qpo->max_lag_ms > 360000) { // this is an absolute time, we convert it to relative
@@ -6589,26 +6736,6 @@ void MySQL_Session::handler___client_DSS_QUERY_SENT___server_DSS_NOT_INITIALIZED
 	if (session_fast_forward == false) {
 		if (qpo->min_gtid) {
 			gtid_uuid = qpo->min_gtid;
-#ifdef PROXYSQLC19
-		} else if (!is_c19 && qpo->gtid_from_hostgroup >= 0) {
-			_gtid_from_backend = find_backend(qpo->gtid_from_hostgroup);
-			if (_gtid_from_backend) {
-				if (_gtid_from_backend->gtid_uuid[0]) {
-					gtid_uuid = _gtid_from_backend->gtid_uuid;
-				}
-			}
-		} else if (is_c19 && c_ctx.gtid_from_hostgroup > 0) {
-			if ((c19 = MyHGM->get_read_gtid_ctx(this, c_ctx.gtid_from_hostgroup))) {
-				if (c_ctx.gtid[0]) {
-					gtid_uuid = c_ctx.gtid;
-				}
-			}
-		} else if (is_c19 && (c19 = MyHGM->get_write_gtid_ctx(this, c_ctx.hostgroup))) {
-			if (c_ctx.gtid[0] && !c_ctx.running) { // If there is a running query we do not use gtid
-				gtid_uuid = c_ctx.gtid;
-			}
-		}
-#else
 		} else if (qpo->gtid_from_hostgroup >= 0) {
 			_gtid_from_backend = find_backend(qpo->gtid_from_hostgroup);
 			if (_gtid_from_backend) {
@@ -6617,7 +6744,6 @@ void MySQL_Session::handler___client_DSS_QUERY_SENT___server_DSS_NOT_INITIALIZED
 				}
 			}
 		} 
-#endif
 		char *sep_pos = NULL;
 		if (gtid_uuid != NULL) {
 			sep_pos = index(gtid_uuid,':');
@@ -6639,56 +6765,19 @@ void MySQL_Session::handler___client_DSS_QUERY_SENT___server_DSS_NOT_INITIALIZED
 			}
 			uuid[n]='\0';
 			mc=thread->get_MyConn_local(mybe->hostgroup_id, this, uuid, trxid, -1);
-#ifdef PROXYSQLC19
-		} else if (c19 && c_ctx.token && c_ctx.running) { // If we are in write concistency and there is a running query we force the right server
-			mc=thread->get_MySrvConn_local(this, c_ctx.srv);
-#endif
 		} else {
 			mc=thread->get_MyConn_local(mybe->hostgroup_id, this, NULL, 0, (int)qpo->max_lag_ms);
 		}
-#ifdef PROXYSQLC19
-		cached = mc ? true : false;
-#endif			
 	}
 	if (mc==NULL) {
 		if (trxid) {
 			mc=MyHGM->get_MyConn_from_pool(mybe->hostgroup_id, this, session_fast_forward, uuid, trxid, -1);
-#ifdef PROXYSQLC19
-		} else if (c19 && c_ctx.token && c_ctx.running) { // If we are in write concistency and there is a running query we force the right server
-			mc=MyHGM->get_MySrvConn_from_pool(this, c_ctx.srv);
-#endif
 		} else {
 			mc=MyHGM->get_MyConn_from_pool(mybe->hostgroup_id, this, session_fast_forward, NULL, 0, (int)qpo->max_lag_ms);
 		}
 	} else {
 		thread->status_variables.ConnPool_get_conn_immediate++;
 	}
-#ifdef PROXYSQLC19
-	if (c19 && !mc && gtid_uuid) { 
-// Are we sure that the binlog reader has read all other writes and is not lagging a bit? 
-// without lag this is an impossible condition because at least one node should have been chosen, so if we have no connection
-// binlog is lagging a bit, so we force the node from memcached
-		proxy_warning("No valid server for gtid %s! Is bin logreader lagging? fallback to %s:%d write token is %lu write key is %s read key is %s last running is %lu\n", gtid_uuid, c_ctx.srv->address, c_ctx.srv->port, c_ctx.token, c_ctx.wkey, c_ctx.rkey, c_ctx.running);
-		mc=thread->get_MySrvConn_local(this, c_ctx.srv);
-		if (!mc) {
-			mc=MyHGM->get_MySrvConn_from_pool(this, c_ctx.srv);
-		} else {
-			cached = true;
-		}
-	}
-	if (c19 && mc && c_ctx.token) { // if we are in write consistency
-		if (!MyHGM->validate_write_gtid_ctx(this, mc) && c_ctx.srv) { // server has been changed so we need to force the new destination
-			if (cached) {
-				thread->push_MyConn_local(mc);
-			} else {
-				MyHGM->push_MyConn_to_pool(mc);
-			}
-			if (!(mc=thread->get_MySrvConn_local(this, c_ctx.srv))) {
-				mc=MyHGM->get_MySrvConn_from_pool(this, c_ctx.srv);
-			}
-		}
-	}
-#endif
 	if (mc) {
 		mybe->server_myds->attach_connection(mc);
 		thread->status_variables.ConnPool_get_conn_success++;
