@@ -6399,35 +6399,43 @@ int MySQL_HostGroups_Manager::get_read_gtid_ctx(MySQL_Session *sess, int hid) {
 			ret = -1;
 		} else if (rrp->type == REDIS_REPLY_ARRAY || rrp->type == REDIS_REPLY_NIL) {
 			if (rrp->type == REDIS_REPLY_ARRAY) {
-				if (rrp->elements != 2 || rrp->element[0]->type != REDIS_REPLY_STRING || rrp->element[1]->type != REDIS_REPLY_STRING) {
+				if (rrp->elements != 2 
+					|| rrp->element[0]->type != rrp->element[1]->type
+					|| (rrp->element[0]->type != REDIS_REPLY_STRING && rrp->element[0]->type != REDIS_REPLY_NIL) || rrp->element[0]->len >  sizeof(sess->c_ctx.gtid) - 1 
+					|| (rrp->element[1]->type != REDIS_REPLY_STRING && rrp->element[1]->type != REDIS_REPLY_NIL) || rrp->element[1]->len > MAX_IDSIZE - 1) {
 					proxy_warning("Read reply elements wrong %d for %s hid %d\n", rrp->elements, sess->c_ctx.rkey, hid);
 					ret = -1;
 				} else {
-					strncpy(sess->c_ctx.gtid, rrp->element[0]->str, sizeof(sess->c_ctx.gtid) - 1);
-					char *h = rrp->element[1]->str;
-					char *p = strchr(h, ':');
-					if (!p) {
-						proxy_warning("On read reply error on server returned value host port %s for %s %d\n", h, sess->c_ctx.rkey, hid);
-						ret = -1;
-					} else {
-						unsigned long port = strtoul(p + 1, NULL, 10);
-						MyHGC *myhgc=MyHGC_lookup(sess->c_ctx.hostgroup);
-						unsigned int l=myhgc->mysrvs->cnt();
-						unsigned int j;
-						*p = 0;
-						for (j=0; j<l; j++) {
-							MySrvC *s = myhgc->mysrvs->idx(j);
-							if (!strcmp(s->address, h) && port == s->port) {
-								sess->c_ctx.srv = s;
-								break;
-							}
-						}
-						if (!sess->c_ctx.srv) {
-							proxy_warning("On read reply error searching host for running query %s %s %d\n", h, sess->c_ctx.rkey, hid);
+					if (rrp->element[0]->type == REDIS_REPLY_STRING) {
+						memcpy(sess->c_ctx.gtid, rrp->element[0]->str, rrp->element[0]->len);
+						sess->c_ctx.gtid[rrp->element[0]->len] = 0;
+						char h[MAX_IDSIZE];
+						memcpy(h, rrp->element[1]->str, rrp->element[1]->len);
+						h[ rrp->element[1]->len] = 0;
+						char *p = strchr(h, ':');
+						if (!p) {
+							proxy_warning("On read reply error on server returned value host port %s for %s %d\n", h, sess->c_ctx.rkey, hid);
 							ret = -1;
 						} else {
-							delete sess->server_myds->rconn;
-							ret = 0; //Query end reply OK
+							unsigned long port = strtoul(p + 1, NULL, 10);
+							MyHGC *myhgc=MyHGC_lookup(sess->c_ctx.hostgroup);
+							unsigned int l=myhgc->mysrvs->cnt();
+							unsigned int j;
+							*p = 0;
+							for (j=0; j<l; j++) {
+								MySrvC *s = myhgc->mysrvs->idx(j);
+								if (!strcmp(s->address, h) && port == s->port) {
+									sess->c_ctx.srv = s;
+									break;
+								}
+							}
+							if (!sess->c_ctx.srv) {
+								proxy_warning("On read reply error searching host for running query %s %s %d\n", h, sess->c_ctx.rkey, hid);
+								ret = -1;
+							} else {
+								delete sess->server_myds->rconn;
+								ret = 0; //Query end reply OK
+							}
 						}
 					}
 				}
@@ -6483,21 +6491,25 @@ int MySQL_HostGroups_Manager::get_write_gtid_ctx(MySQL_Session *sess, int hid) {
 	char previd[MAX_IDSIZE/2];
 	bool running;
 */				
-			if (rrp->elements != 5 || rrp->element[0]->type != REDIS_REPLY_STRING
-				|| (rrp->element[1]->type != REDIS_REPLY_STRING || rrp->element[1]->type != REDIS_REPLY_NIL)
-				|| (rrp->element[2]->type != REDIS_REPLY_STRING || rrp->element[2]->type != REDIS_REPLY_NIL)
-				|| (rrp->element[3]->type != REDIS_REPLY_STRING || rrp->element[3]->type != REDIS_REPLY_NIL)
-				|| (rrp->element[4]->type != REDIS_REPLY_STRING || rrp->element[4]->type != REDIS_REPLY_NIL)
+			if (rrp->elements != 5 || rrp->element[0]->type != REDIS_REPLY_STRING || rrp->element[0]->len > sizeof(sess->c_ctx.tokenid) - 1
+				|| (rrp->element[1]->type != REDIS_REPLY_STRING && rrp->element[1]->type != REDIS_REPLY_NIL) || rrp->element[1]->len > sizeof(sess->c_ctx.gtid) - 1
+				|| (rrp->element[2]->type != REDIS_REPLY_STRING && rrp->element[2]->type != REDIS_REPLY_NIL) || rrp->element[2]->len > MAX_IDSIZE - 1
+				|| rrp->element[3]->type != REDIS_REPLY_STRING || rrp->element[3]->len > sizeof(sess->c_ctx.previd) - 1
+				|| (rrp->element[4]->type != REDIS_REPLY_STRING && rrp->element[4]->type != REDIS_REPLY_NIL)
 				) {
 				proxy_warning("Read reply elements wrong %d for %s hid %d\n", rrp->elements, sess->c_ctx.wkey, hid);
 				ret = -1;
 			} else {
-				strncpy(sess->c_ctx.tokenid, rrp->element[0]->str, sizeof(sess->c_ctx.tokenid) - 1);
+				memcpy(sess->c_ctx.tokenid, rrp->element[0]->str, rrp->element[0]->len);
+				sess->c_ctx.tokenid[rrp->element[0]->len] = 0;
 				if (rrp->element[1]->type == REDIS_REPLY_STRING) {
-					strncpy(sess->c_ctx.gtid, rrp->element[1]->str, sizeof(sess->c_ctx.gtid) - 1);
+					memcpy(sess->c_ctx.gtid, rrp->element[1]->str, rrp->element[1]->len);
+					sess->c_ctx.gtid[rrp->element[1]->len] = 0;
 				}
 				if (rrp->element[2]->type == REDIS_REPLY_STRING) {
-					char *h = rrp->element[2]->str;
+					char h[MAX_IDSIZE];
+					memcpy(h, rrp->element[2]->str, rrp->element[2]->len);
+					h[rrp->element[2]->len] = 0;
 					char *p = strchr(h, ':');
 					if (!p) {
 						proxy_warning("On write reply error on server returned value host port %s for %s %d\n", h, sess->c_ctx.wkey, hid);
@@ -6523,9 +6535,8 @@ int MySQL_HostGroups_Manager::get_write_gtid_ctx(MySQL_Session *sess, int hid) {
 						}
 				 	}
 				}
-				if (rrp->element[3]->type == REDIS_REPLY_STRING) {
-					strncpy(sess->c_ctx.previd, rrp->element[3]->str, sizeof(sess->c_ctx.previd) - 1);
-				}
+				memcpy(sess->c_ctx.previd, rrp->element[3]->str, rrp->element[3]->len);
+				sess->c_ctx.previd[rrp->element[3]->len] = 0;
 				if (rrp->element[4]->type == REDIS_REPLY_STRING) {
 					sess->c_ctx.running = true;
 				}
@@ -6579,7 +6590,9 @@ int MySQL_HostGroups_Manager::validate_write_gtid_ctx(MySQL_Session *sess) {
 			proxy_warning("Validate reply is null for %s hid %d\n", sess->c_ctx.rkey, hid);
 			ret = -1;
 		} else if (rrp->type == REDIS_REPLY_STRING) {
-			char *h = rrp->str;
+			char h[MAX_IDSIZE];
+			memcpy(h, rrp->str, rrp->len);
+			h[rrp->len] = 0;
 			char *p = strchr(h, ':');
 			if (!p) {
 				proxy_warning("On validate reply error on server returned value host port %s for %s token %s %d\n", h, sess->c_ctx.wkey, sess->c_ctx.tokenid, hid);
