@@ -6647,7 +6647,7 @@ void MySQL_Session::handler___client_DSS_QUERY_SENT___server_DSS_NOT_INITIALIZED
 		}
 	}
 	if (c_ctx.tokenid[0]) { // if we are in write consistency we need to validate choosen server
-		if (strcmp(c_ctx.tokenid, c_ctx.previd)) {
+		if (strcmp(c_ctx.tokenid, c_ctx.previd)) { // if our token has been temporary taken by someone else we already knows where to go
 			if ((ret = MyHGM->validate_write_gtid_ctx(this)) == 0) {
 				mc=thread->get_MySrvConn_local(this, c_ctx.srv);
 				if (!mc) {
