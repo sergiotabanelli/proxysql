@@ -1,12 +1,6 @@
 <?php
-date_default_timezone_set('UTC');
-$mysqli = new mysqli('127.0.0.1', 'root#pippo1', 'password', 'test', 6033);
-if ($mysqli->connect_error) {
-    die('Connect Error (' . $mysqli->connect_errno . ') '
-            . $mysqli->connect_error);
-}
+require_once('tinc.php');
 $iter = 5;
-echo date('Y-m-d H:i:s') . " Starting to SETUP the test\n";
 $stmti = $mysqli->prepare("INSERT INTO test VALUES (NULL, uuid(), now(), ?)");
 $stmts = $mysqli->prepare("SELECT COUNT(*) AS 'count', @@gtid_executed AS 'gtid_executed', @@server_id AS 'server_id' FROM test WHERE i = ?");
 $i = 0;

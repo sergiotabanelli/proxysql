@@ -29,6 +29,7 @@ class Redis_Connection {
     bool reading;
 	bool writing;
     bool running;
+	int revents;
 	enum c19_status status;
     int async_command(const char *format, ...);
 	void attach_poll();

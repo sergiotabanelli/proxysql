@@ -225,6 +225,9 @@ MySQL_Data_Stream::MySQL_Data_Stream() {
 	statuses.myconnpoll_put = 0;
 
 	com_field_wild=NULL;
+#ifdef PROXYSQLC19
+	rconn = NULL;
+#endif
 }
 
 // Destructor
@@ -317,6 +320,12 @@ MySQL_Data_Stream::~MySQL_Data_Stream() {
 		CompPktOUT.pkt.ptr=NULL;
 		CompPktOUT.pkt.size=0;
 	}
+#ifdef PROXYSQLC19
+	if (rconn) {
+		delete rconn;
+		rconn=NULL; 
+	}
+#endif
 }
 
 // this function initializes a MySQL_Data_Stream 
@@ -1427,6 +1436,7 @@ static redisReply *dupReplyObject(redisReply* reply) {
         r->str = (char*)malloc(reply->len+1);
         memcpy(r->str, reply->str, reply->len);
         r->str[reply->len] = '\0';
+		c19log1("Redis reply item %s\n", r->str);
     }
     else if(REDIS_REPLY_ARRAY==reply->type) //copy array
     {
@@ -1450,47 +1460,52 @@ static redisReply *dupReplyObject(redisReply* reply) {
 
 static void redisPollAddRead(void *privdata) {
 	Redis_Connection *rc = (Redis_Connection *)privdata;
+	c19log("Redis poll add read reading %d\n", rc->reading);
     if (!rc->reading) {
         rc->reading = true;
-		int i = rc->myds->mypolls->find_index(rc->ac->c.fd);
+		int i = rc->myds->sess->thread->mypolls.find_index(rc->ac->c.fd);
 		if (i>=0) {
-			rc->myds->mypolls->fds[i].events |= POLLIN;
+			rc->myds->sess->thread->mypolls.fds[i].events |= POLLIN;
 		}
     }
 }
 
 static void redisPollDelRead(void *privdata) {
 	Redis_Connection *rc = (Redis_Connection *)privdata;
+	c19log("Redis poll del read reading %d\n", rc->reading);
     if (rc->reading) {
         rc->reading = false;
-		int i = rc->myds->mypolls->find_index(rc->ac->c.fd);
+		int i = rc->myds->sess->thread->mypolls.find_index(rc->ac->c.fd);
 		if (i>=0) {
-			rc->myds->mypolls->fds[i].events &= ~POLLIN;
+			rc->myds->sess->thread->mypolls.fds[i].events &= ~POLLIN;
 		}
     }
 }
 
 static void redisPollAddWrite(void *privdata) {
 	Redis_Connection *rc = (Redis_Connection *)privdata;
+	c19log("Redis poll add write writing %d\n", rc->writing);
     if (!rc->writing) {
         rc->writing = true;
-		int i = rc->myds->mypolls->find_index(rc->ac->c.fd);
+		int i = rc->myds->sess->thread->mypolls.find_index(rc->ac->c.fd);
 		if (i>=0) {
-			rc->myds->mypolls->fds[i].events |= POLLOUT;
+			rc->myds->sess->thread->mypolls.fds[i].events |= POLLOUT;
 		}
     }
 }
 
 static void redisPollDelWrite(void *privdata) {
 	Redis_Connection *rc = (Redis_Connection *)privdata;
+	c19log("Redis poll del write writing %d\n", rc->writing);
     if (rc->writing) {
         rc->writing = false;
-		int i = rc->myds->mypolls->find_index(rc->ac->c.fd);
+		int i = rc->myds->sess->thread->mypolls.find_index(rc->ac->c.fd);
 		if (i>=0) {
-			rc->myds->mypolls->fds[i].events &= ~POLLOUT;
+			rc->myds->sess->thread->mypolls.fds[i].events &= ~POLLOUT;
 		}
     }
 }
+
 /*
 static void redisPollCleanup(void *privdata) {
 	Redis_Connection *rc = (Redis_Connection *)privdata;
@@ -1503,6 +1518,10 @@ static void redisPollCleanup(void *privdata) {
 */
 static void reply_cb(redisAsyncContext *c, void *r, void *privdata) {
 	Redis_Connection *rc = (Redis_Connection *)privdata;
+	c19log("Redis reply_cb status %d\n", rc->status);
+	if (r && ((redisReply *)r)->type == REDIS_REPLY_ERROR) {
+		proxy_warning("Redis reply error %.*s\n", ((redisReply *)r)->len, ((redisReply *)r)->str);
+	}
 	if (rc->status == C19_END) {
 		delete rc;
 		return;
@@ -1521,10 +1540,18 @@ static void reply_cb(redisAsyncContext *c, void *r, void *privdata) {
 	rc->writing = false;
 }
 
+static void connect_cb(const redisAsyncContext *c, int status) {
+	c19log("Connection callback status %d\n", status);
+    if (status != REDIS_OK) {
+        proxy_warning("Redis connect error: %s\n", c->errstr);
+        return;
+    }
+}
+
 Redis_Connection::Redis_Connection(const char *cs, MySQL_Data_Stream *ds) {
 	const char *p = strchr(cs, ':');
 	int port = 6379;
-	const char *ip = p;
+	const char *ip = cs;
 	running = false;
 	reading = false;
 	writing = false;
@@ -1534,7 +1561,7 @@ Redis_Connection::Redis_Connection(const char *cs, MySQL_Data_Stream *ds) {
 		port = strtoul(p + 1, NULL, 10);
 		ip = strndup(cs, p - cs);
 	}
-	
+	c19log("Connect to redis ip %s port %d\n", cs, port);
     ac = redisAsyncConnect(ip, port);
     if (ac->err) {
 		proxy_warning("Error on async redis connect for %s port %d error %s\n", ip, port, ac->errstr);
@@ -1542,10 +1569,11 @@ Redis_Connection::Redis_Connection(const char *cs, MySQL_Data_Stream *ds) {
 		ac = NULL;
     } else {
 		myds = ds;	
+    	redisAsyncSetConnectCallback(ac, connect_cb);
 		attach_poll();
-		if (ip && ip != cs) {
-			free((void *)ip);
-		}
+	}
+	if (ip && ip != cs) {
+		free((void *)ip);
 	}
 }
 
@@ -1562,19 +1590,23 @@ Redis_Connection::~Redis_Connection() {
 }
 
 void Redis_Connection::event_handler(int revents) {
-	if (revents==POLLIN) {
+	c19log("Event handler %X\n", revents);
+	if (revents & POLLIN) {
     	redisAsyncHandleRead(ac);
-	} else if (revents==POLLOUT) {
+	} else if (revents & POLLOUT) {
 	    redisAsyncHandleWrite(ac);
 	} else {
-		proxy_warning("Error on poll event %d\n", revents);
+		proxy_warning("Error on poll event %X\n", revents);
 	}
+	c19log("Return event handler\n");
 }
 
 void Redis_Connection::attach_poll() {
+	c19log("Attach poll fd %d running %d ds %p poll %d\n", ac ? ac->c.fd : -1, running, myds, POLLIN|POLLOUT);
 	if (ac && !running && myds) {
 		myds->rconn = this;
-		myds->mypolls->add(0, ac->c.fd, myds, 0);
+//		myds->sess->thread->mypolls.add(POLLIN|POLLOUT, ac->c.fd, myds, 0);
+		myds->sess->thread->mypolls.add(0, ac->c.fd, myds, 0);
 		ac->ev.addRead = redisPollAddRead;
 		ac->ev.delRead = redisPollDelRead;
 		ac->ev.addWrite = redisPollAddWrite;
@@ -1585,16 +1617,18 @@ void Redis_Connection::attach_poll() {
 }
 
 void Redis_Connection::detach_poll() {
+	c19log("Detach poll ac %p ds %p\n", ac, myds);
 	if (ac && myds) {
-		myds->rconn = NULL;
-		int i=myds->mypolls->find_index(ac->c.fd);
+		int i=myds->sess->thread->mypolls.find_index(ac->c.fd);
 		if (i>=0) {
-			myds->mypolls->remove_index_fast(i);
+			myds->sess->thread->mypolls.remove_index_fast(i);
 		}
+		myds->rconn = NULL;
 	}
 }
 
 int Redis_Connection::async_command(const char *format, ...) {
+	c19log("Async command poll ac %p running %d\n", ac, running);
 	if (ac && !running) {
 		va_list ap;
 		int status;

@@ -6127,7 +6127,7 @@ void C19_Info::replace_placeholders(MySQL_Session *sess, consistency_ctx *c_ctx,
 					val = sess->client_myds->myconn->userinfo->schemaname;
 					break;				
 				default:
-					proxy_warning("On replace placeholder: invalid placeholder for wkey %s %d\n", writer_key, hostgroup);
+//					proxy_warning("On replace placeholder: invalid placeholder for wkey %s %d\n", writer_key, hostgroup);
 					break;
 				}
 			}
@@ -6172,7 +6172,7 @@ void C19_Info::replace_placeholders(MySQL_Session *sess, consistency_ctx *c_ctx,
 					val = sess->client_myds->myconn->userinfo->schemaname;
 					break;				
 				default:
-					proxy_warning("On replace placeholder: invalid placeholder for rkey %s %d\n", reader_key, hostgroup);
+//					proxy_warning("On replace placeholder: invalid placeholder for rkey %s %d\n", reader_key, hostgroup);
 					break;
 				}
 			}
@@ -6280,8 +6280,8 @@ static void clean_gtid_ctx(MySQL_Session *sess) {
 	sess->c_ctx.srv = NULL;
 	sess->c_ctx.tokenid[0] = 0;
 	sess->c_ctx.gtid_from_hostgroup = 0;
-	if (sess->server_myds->rconn && sess->server_myds->rconn->status != C19_END) { // It should not happen ... force delete
-		delete sess->server_myds->rconn;
+	if (sess->mybe->server_myds->rconn && sess->mybe->server_myds->rconn->status != C19_END) { // It should not happen ... force delete
+		delete sess->mybe->server_myds->rconn;
 	}
 }
 
@@ -6305,19 +6305,20 @@ bool MySQL_HostGroups_Manager::is_c19(MySQL_Session *sess, session_status status
 
 void MySQL_HostGroups_Manager::close_write_gtid_ctx(MySQL_Session *sess) {
 	c19log("Enter %p %s %s\n", sess, sess->c_ctx.tokenid, sess->c_ctx.wkey);
-	if (!sess->c_ctx.tokenid[0] || (sess->server_myds->rconn && sess->server_myds->rconn->running)) {
-		proxy_warning("Close context not valid: wkey %s token %s rconn %p\n", sess->c_ctx.wkey, sess->c_ctx.tokenid, sess->server_myds->rconn);
+	if (!sess->c_ctx.tokenid[0] || (sess->mybe->server_myds->rconn && sess->mybe->server_myds->rconn->running)) {
+		proxy_warning("Close context not valid: wkey %s token %s rconn %p\n", sess->c_ctx.wkey, sess->c_ctx.tokenid, sess->mybe->server_myds->rconn);
 		clean_gtid_ctx(sess);
 		return;
 	}
 	std::map<int , C19_Info *>::iterator it2=C19_Info_Map.find(sess->c_ctx.hostgroup);
 	if (it2!=C19_Info_Map.end()) {
 		C19_Info *info=it2->second;
-		Redis_Connection *rc = sess->server_myds->rconn ? sess->server_myds->rconn : new Redis_Connection(info->connection_string, sess->server_myds);
+		Redis_Connection *rc = sess->mybe->server_myds->rconn ? sess->mybe->server_myds->rconn : new Redis_Connection(info->connection_string, sess->mybe->server_myds);
 		char d[7];
 		rc->status = C19_END;
 		snprintf(d, sizeof(d) - 1, "%d", info->depth * 2);
 		char *k=sess->qpo->c19_wkey ? sess->qpo->c19_wkey : sess->c_ctx.wkey;
+		c19log("c19.close %s %s %s\n", k, sess->c_ctx.tokenid, d);
 		int rcret = rc->async_command("c19.close %s %s %s", k, sess->c_ctx.tokenid, d);
 		if (rcret != REDIS_OK) {
 			proxy_warning("Close command error: wkey %s token %s error %d\n", sess->c_ctx.wkey, sess->c_ctx.tokenid, rcret);			
@@ -6332,8 +6333,8 @@ void MySQL_HostGroups_Manager::close_write_gtid_ctx(MySQL_Session *sess) {
 
 void MySQL_HostGroups_Manager::save_gtid_ctx(MySQL_Session *sess, char *gtid, MySrvC *srvc) {
 	c19log("Enter %p %s %p\n", sess, gtid, srvc);
-	if (sess->c_ctx.tokenid[0] && (!sess->server_myds->rconn || sess->server_myds->rconn->running)) {
-		proxy_warning("Save context not valid: rkey %s wkey %s token %s rconn %p\n", sess->c_ctx.rkey, sess->c_ctx.wkey, sess->c_ctx.tokenid, sess->server_myds->rconn);
+	if (sess->c_ctx.tokenid[0] && (!sess->mybe->server_myds->rconn || sess->mybe->server_myds->rconn->running)) {
+		proxy_warning("Save context not valid: rkey %s wkey %s token %s rconn %p\n", sess->c_ctx.rkey, sess->c_ctx.wkey, sess->c_ctx.tokenid, sess->mybe->server_myds->rconn);
 		clean_gtid_ctx(sess);
 		return;
 	}
@@ -6341,7 +6342,7 @@ void MySQL_HostGroups_Manager::save_gtid_ctx(MySQL_Session *sess, char *gtid, My
 	if (it2!=C19_Info_Map.end()) {
 		C19_Info *info=it2->second;
 		// Redis connection equal null could happen if a query is evaluated for read consistency enforcement but nevertheless produce a gtid
-		Redis_Connection *rc = sess->server_myds->rconn ? sess->server_myds->rconn : new Redis_Connection(info->connection_string, sess->server_myds);
+		Redis_Connection *rc = sess->mybe->server_myds->rconn ? sess->mybe->server_myds->rconn : new Redis_Connection(info->connection_string, sess->mybe->server_myds);
 		char *rk=sess->qpo->c19_rkey ? sess->qpo->c19_rkey : sess->c_ctx.rkey;
 		char *wk=NULL;
 		int rcret = REDIS_OK;
@@ -6352,8 +6353,10 @@ void MySQL_HostGroups_Manager::save_gtid_ctx(MySQL_Session *sess, char *gtid, My
 			char d[7];
 			snprintf(d, sizeof(d) - 1, "%d", info->depth * 2);			
 			wk=sess->qpo->c19_wkey ? sess->qpo->c19_wkey : sess->c_ctx.wkey;
+			c19log("c19.save %s %s %s %s %s %s\n", wk, sess->c_ctx.tokenid, d, rk, sid, gtid);
 			rcret = rc->async_command("c19.save %s %s %s %s %s %s", wk, sess->c_ctx.tokenid, d, rk, sid, gtid);
 		} else { // Only read ctx
+			c19log("c19.save %s %s %s\n", rk, sid, gtid);
 			rcret = rc->async_command("c19.save %s %s %s", rk, sid, gtid);
 		}
 		if (rcret != REDIS_OK) {
@@ -6370,19 +6373,23 @@ void MySQL_HostGroups_Manager::save_gtid_ctx(MySQL_Session *sess, char *gtid, My
 int MySQL_HostGroups_Manager::get_read_gtid_ctx(MySQL_Session *sess, int hid) {
 	c19log("Enter %p %d\n", sess, hid);
 	int ret = 1; // 1 means still running
-	if (sess->server_myds->rconn && sess->server_myds->rconn->status != C19_GET_READ) {
-		proxy_warning("Redis connection already present : rkey %s wkey %s token %s rconn status %d\n", sess->c_ctx.rkey, sess->c_ctx.wkey, sess->c_ctx.tokenid, sess->server_myds->rconn->status);
-		if (sess->server_myds->rconn->status != C19_END || !sess->server_myds->rconn->running) { // If context is closing we wait  
+	if (sess->mybe->server_myds->rconn && sess->mybe->server_myds->rconn->status != C19_GET_READ) {
+		proxy_warning("Redis connection already present : rkey %s wkey %s token %s rconn status %d\n", sess->c_ctx.rkey, sess->c_ctx.wkey, sess->c_ctx.tokenid, sess->mybe->server_myds->rconn->status);
+		if (sess->mybe->server_myds->rconn->status != C19_END || !sess->mybe->server_myds->rconn->running) { // If context is closing we wait  
 			ret = -1;
 		}
-	} else if (!sess->server_myds->rconn) {
+	} else if (!sess->mybe->server_myds->rconn) {
 		clean_gtid_ctx(sess);
 		std::map<int , C19_Info *>::iterator it2=C19_Info_Map.find(hid);
 		if (it2!=C19_Info_Map.end()) {
 			C19_Info *info=it2->second;
-			Redis_Connection *rc = new Redis_Connection(info->connection_string, sess->server_myds);
+			Redis_Connection *rc = new Redis_Connection(info->connection_string, sess->mybe->server_myds);
 			char *k=sess->qpo->c19_rkey ? sess->qpo->c19_rkey : sess->c_ctx.rkey;
+			if (!sess->c_ctx.rkey[0]) { // This is first call for this client connection so we need to inizialize keys
+				info->replace_placeholders(sess, &sess->c_ctx);
+			}
 			rc->status = C19_GET_READ;
+			c19log("c19.read %s\n", k);
 			int rcret = rc->async_command("c19.read %s", k);
 			if (rcret != REDIS_OK) {
 				proxy_warning("Read command error: key %s error %d\n", k, rcret);
@@ -6392,8 +6399,8 @@ int MySQL_HostGroups_Manager::get_read_gtid_ctx(MySQL_Session *sess, int hid) {
 			proxy_warning("On get read: error searching c19 hostgroup! for hostgroup %d \n", hid);
 			ret = -1;
 		}
-	} else if (!sess->server_myds->rconn->running) {
-		redisReply *rrp = sess->server_myds->rconn->reply;
+	} else if (!sess->mybe->server_myds->rconn->running) {
+		redisReply *rrp = sess->mybe->server_myds->rconn->reply;
 		if (!rrp) {
 			proxy_warning("Read reply is null for %s hid %d\n", sess->c_ctx.rkey, hid);
 			ret = -1;
@@ -6426,7 +6433,7 @@ int MySQL_HostGroups_Manager::get_read_gtid_ctx(MySQL_Session *sess, int hid) {
 							proxy_warning("On read reply error searching host for running query %s %s %d\n", h, sess->c_ctx.rkey, hid);
 							ret = -1;
 						} else {
-							delete sess->server_myds->rconn;
+							delete sess->mybe->server_myds->rconn;
 							ret = 0; //Query end reply OK
 						}
 					}
@@ -6447,19 +6454,23 @@ int MySQL_HostGroups_Manager::get_read_gtid_ctx(MySQL_Session *sess, int hid) {
 int MySQL_HostGroups_Manager::get_write_gtid_ctx(MySQL_Session *sess, int hid) {
 	c19log("Enter %p %d\n", sess, hid);
 	int ret = 1; // 1 means still running
-	if (sess->server_myds->rconn && sess->server_myds->rconn->status != C19_GET_WRITE) {
-		proxy_warning("Redis connection already present : rkey %s wkey %s token %s rconn status %d\n", sess->c_ctx.rkey, sess->c_ctx.wkey, sess->c_ctx.tokenid, sess->server_myds->rconn->status);
+	if (sess->mybe->server_myds->rconn && sess->mybe->server_myds->rconn->status != C19_GET_WRITE) {
+		proxy_warning("Redis connection already present : rkey %s wkey %s token %s rconn status %d\n", sess->c_ctx.rkey, sess->c_ctx.wkey, sess->c_ctx.tokenid, sess->mybe->server_myds->rconn->status);
 		ret = -1;
-	} else if (!sess->server_myds->rconn) {
+	} else if (!sess->mybe->server_myds->rconn) {
 		clean_gtid_ctx(sess);
 		std::map<int , C19_Info *>::iterator it2=C19_Info_Map.find(hid);
 		if (it2!=C19_Info_Map.end()) {
 			C19_Info *info=it2->second;
-			Redis_Connection *rc = new Redis_Connection(info->connection_string, sess->server_myds);
+			Redis_Connection *rc = new Redis_Connection(info->connection_string, sess->mybe->server_myds);
 			char *k=sess->qpo->c19_wkey ? sess->qpo->c19_wkey : sess->c_ctx.wkey;
 			char d[7];
+			if (!sess->c_ctx.rkey[0]) { // This is first call for this client connection so we need to inizialize keys
+				info->replace_placeholders(sess, &sess->c_ctx);
+			}
 			snprintf(d, sizeof(d) - 1, "%d", info->depth * 2);			
 			rc->status = C19_GET_WRITE;
+			c19log("c19.write %s %s\n", k, d);
 			int rcret = rc->async_command("c19.write %s %s", k, d);
 			if (rcret != REDIS_OK) {
 				proxy_warning("Write command error: key %s depth %s error %d\n", k, d, rcret);
@@ -6469,8 +6480,8 @@ int MySQL_HostGroups_Manager::get_write_gtid_ctx(MySQL_Session *sess, int hid) {
 			proxy_warning("On get write: error searching c19 hostgroup! for hostgroup %d \n", hid);
 			ret = -1;
 		}
-	} else if (!sess->server_myds->rconn->running) {
-		redisReply *rrp = sess->server_myds->rconn->reply;
+	} else if (!sess->mybe->server_myds->rconn->running) {
+		redisReply *rrp = sess->mybe->server_myds->rconn->reply;
 		if (!rrp) {
 			proxy_warning("Write reply is null for %s hid %d\n", sess->c_ctx.wkey, hid);
 			ret = -1;
@@ -6483,20 +6494,20 @@ int MySQL_HostGroups_Manager::get_write_gtid_ctx(MySQL_Session *sess, int hid) {
 	char previd[MAX_IDSIZE/2];
 	bool running;
 */				
-			if (rrp->elements != 5 || rrp->element[0]->type != REDIS_REPLY_STRING
-				|| (rrp->element[1]->type != REDIS_REPLY_STRING || rrp->element[1]->type != REDIS_REPLY_NIL)
-				|| (rrp->element[2]->type != REDIS_REPLY_STRING || rrp->element[2]->type != REDIS_REPLY_NIL)
-				|| (rrp->element[3]->type != REDIS_REPLY_STRING || rrp->element[3]->type != REDIS_REPLY_NIL)
-				|| (rrp->element[4]->type != REDIS_REPLY_STRING || rrp->element[4]->type != REDIS_REPLY_NIL)
+			if (rrp->elements != 5 || rrp->element[0]->type != REDIS_REPLY_STRING || !rrp->element[0]->len
+				|| (rrp->element[1]->type != REDIS_REPLY_STRING && rrp->element[1]->type != REDIS_REPLY_NIL)
+				|| (rrp->element[2]->type != REDIS_REPLY_STRING && rrp->element[2]->type != REDIS_REPLY_NIL)
+				|| (rrp->element[3]->type != REDIS_REPLY_STRING && rrp->element[3]->type != REDIS_REPLY_NIL)
+				|| (rrp->element[4]->type != REDIS_REPLY_STRING && rrp->element[4]->type != REDIS_REPLY_NIL)
 				) {
-				proxy_warning("Read reply elements wrong %d for %s hid %d\n", rrp->elements, sess->c_ctx.wkey, hid);
+				proxy_warning("Write reply elements wrong %d for %s hid %d types %d %d %d %d %d\n", rrp->elements, sess->c_ctx.wkey, hid, rrp->element[0]->type, rrp->element[1]->type, rrp->element[2]->type, rrp->element[3]->type, rrp->element[4]->type);
 				ret = -1;
 			} else {
 				strncpy(sess->c_ctx.tokenid, rrp->element[0]->str, sizeof(sess->c_ctx.tokenid) - 1);
-				if (rrp->element[1]->type == REDIS_REPLY_STRING) {
+				if (rrp->element[1]->type == REDIS_REPLY_STRING && rrp->element[1]->len) {
 					strncpy(sess->c_ctx.gtid, rrp->element[1]->str, sizeof(sess->c_ctx.gtid) - 1);
 				}
-				if (rrp->element[2]->type == REDIS_REPLY_STRING) {
+				if (rrp->element[2]->type == REDIS_REPLY_STRING && rrp->element[2]->len) {
 					char *h = rrp->element[2]->str;
 					char *p = strchr(h, ':');
 					if (!p) {
@@ -6523,13 +6534,13 @@ int MySQL_HostGroups_Manager::get_write_gtid_ctx(MySQL_Session *sess, int hid) {
 						}
 				 	}
 				}
-				if (rrp->element[3]->type == REDIS_REPLY_STRING) {
+				if (rrp->element[3]->type == REDIS_REPLY_STRING && rrp->element[3]->len) {
 					strncpy(sess->c_ctx.previd, rrp->element[3]->str, sizeof(sess->c_ctx.previd) - 1);
 				}
-				if (rrp->element[4]->type == REDIS_REPLY_STRING) {
+				if (rrp->element[4]->type == REDIS_REPLY_STRING && rrp->element[4]->len) {
 					sess->c_ctx.running = true;
 				}
-				sess->server_myds->rconn->status = C19_WAIT;
+				sess->mybe->server_myds->rconn->status = C19_WAIT;
 				ret = 0; //Query end reply OK
 			}
 		} else {
@@ -6546,24 +6557,29 @@ err:
 }
 
 int MySQL_HostGroups_Manager::validate_write_gtid_ctx(MySQL_Session *sess) {
-	c19log("Enter %p %p\n", sess);
+	c19log("Enter %p %p\n", sess, sess->mybe->server_myds->rconn);
 	int ret = 1; // 1 means still running
 	int hid = sess->c_ctx.hostgroup;
 	MySrvC *srv = sess->c_ctx.srv;
-	if (!sess->server_myds->rconn || (sess->server_myds->rconn->status != C19_VALIDATE && sess->server_myds->rconn->status != C19_WAIT)) {
-		proxy_warning("Redis connection already present : rkey %s wkey %s token %s rconn status %d\n", sess->c_ctx.rkey, sess->c_ctx.wkey, sess->c_ctx.tokenid, sess->server_myds->rconn->status);
+	if (!srv) {
+		proxy_warning("Something wrong no srv selected\n");
+		return -1;
+	}
+	if (!sess->mybe->server_myds->rconn || (sess->mybe->server_myds->rconn->status != C19_VALIDATE && sess->mybe->server_myds->rconn->status != C19_WAIT)) {
+		proxy_warning("Redis connection already present : rkey %s wkey %s token %s rconn status %d\n", sess->c_ctx.rkey, sess->c_ctx.wkey, sess->c_ctx.tokenid, sess->mybe->server_myds->rconn->status);
 		ret = -1;
-	} else if (!sess->server_myds->rconn->running) {
+	} else if (sess->mybe->server_myds->rconn->status == C19_WAIT) {
 		std::map<int , C19_Info *>::iterator it2=C19_Info_Map.find(hid);
 		if (it2!=C19_Info_Map.end()) {
 			C19_Info *info=it2->second;
-			Redis_Connection *rc = sess->server_myds->rconn;
+			Redis_Connection *rc = sess->mybe->server_myds->rconn;
 			char *k=sess->qpo->c19_wkey ? sess->qpo->c19_wkey : sess->c_ctx.wkey;
 			char sid[MAX_IDSIZE];
 			snprintf(sid, sizeof(sid) - 1, "%s:%d", srv->address, srv->port);
 			char d[7];
 			snprintf(d, sizeof(d) - 1, "%d", info->depth * 2);			
 			rc->status = C19_VALIDATE;
+			c19log("c19.validate %s %s %s %s %s\n", k, sess->c_ctx.tokenid, sess->c_ctx.previd, sid, sess->c_ctx.gtid);
 			int rcret = rc->async_command("c19.validate %s %s %s %s %s", k, sess->c_ctx.tokenid, sess->c_ctx.previd, sid, sess->c_ctx.gtid);
 			if (rcret != REDIS_OK) {
 				proxy_warning("Write command error: key %s depth %s error %d\n", k, d, rcret);
@@ -6573,8 +6589,8 @@ int MySQL_HostGroups_Manager::validate_write_gtid_ctx(MySQL_Session *sess) {
 			proxy_warning("On validate error searching c19 hostgroup! for hostgroup %d \n", hid);
 			ret = -1;
 		}
-	} else {
-		redisReply *rrp = sess->server_myds->rconn->reply;
+	} else if (!sess->mybe->server_myds->rconn->running) {
+		redisReply *rrp = sess->mybe->server_myds->rconn->reply;
 		if (!rrp) {
 			proxy_warning("Validate reply is null for %s hid %d\n", sess->c_ctx.rkey, hid);
 			ret = -1;

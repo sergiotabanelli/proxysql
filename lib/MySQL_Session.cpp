@@ -2793,7 +2793,7 @@ bool MySQL_Session::handler_again___status_CONNECTING_SERVER(int *_rc) {
 #ifdef PROXYSQLC19
 	session_status pst = previous_status.top();
 	bool is_c19 = MyHGM->is_c19(this, pst);
-	if (mybe->server_myds->myconn==NULL || (is_c19 && mybe->server_myds->rconn && mybe->server_myds->rconn->status == C19_VALIDATE)) { // In c19 consistency myconn can be not null but sill waiting for validation
+	if (mybe->server_myds->myconn==NULL) { // In c19 consistency myconn can be not null but sill waiting for validation
 		if (session_fast_forward == false && !qpo->min_gtid && is_c19) {
 			c19 = true;
 			handler___client_DSS_QUERY_SENT___server_DSS_NOT_INITIALIZED__get_c19_connection();
@@ -2815,6 +2815,7 @@ bool MySQL_Session::handler_again___status_CONNECTING_SERVER(int *_rc) {
 #ifdef PROXYSQLC19
 	if (mybe->server_myds->myconn==NULL) {
 		if (mybe->server_myds->myconn==NULL && !mybe->server_myds->rconn) { // We pause only if there is no c19 ctx, with c19 myconn null should happen only if something goes wrong or if we are fetching gtids from shared cache
+			c19log("Pause for unavailable connection");
 			pause_until=thread->curtime+mysql_thread___connect_retries_delay*1000;
 			*_rc=1;
 		} else {
@@ -6558,33 +6559,33 @@ void MySQL_Session::handler___client_DSS_QUERY_SENT___server_DSS_NOT_INITIALIZED
 	char uuid[64];
 	char * gtid_uuid=NULL;
 	uint64_t trxid = 0;
-//	c19log1("Enter get_connection()\n");
-	if (c_ctx.tokenid[0] && (!server_myds->rconn || server_myds->rconn->status != C19_VALIDATE)) {
+	c19log("Enter get_connection() smyds %p\n", mybe->server_myds);
+	if (c_ctx.tokenid[0] && (!mybe->server_myds->rconn || mybe->server_myds->rconn->status != C19_VALIDATE)) {
 		proxy_warning("C19_Info consistency not closed! something wrong! force close and skip c19: %s, %d, %s, %s\n", c_ctx.srv ? c_ctx.srv->address : "", c_ctx.srv ? c_ctx.srv->port : 0, c_ctx.gtid, c_ctx.tokenid);
 		MyHGM->close_write_gtid_ctx(this);
 		return;
 	}
 	int ret = 0;
-	if (!server_myds->rconn || server_myds->rconn->status != C19_VALIDATE) {
+	if (!mybe->server_myds->rconn || mybe->server_myds->rconn->status != C19_VALIDATE) {
 		if (c_ctx.gtid_from_hostgroup > 0) {
 			if ((ret = MyHGM->get_read_gtid_ctx(this, c_ctx.gtid_from_hostgroup)) == 0) {
 				if (c_ctx.gtid[0]) {
 					gtid_uuid = c_ctx.gtid;
 				}
 			} else if (ret == -1) {
-				Redis_Connection *rc = server_myds->rconn;
+				Redis_Connection *rc = mybe->server_myds->rconn;
 				proxy_warning("Something wrong on get read: redis conn %p status %d reply %p\n", rc, rc ? rc->status : 0, rc ? rc->reply : 0);
 				goto ear;
 			} else {
 				return; // Still running
 			}
 		} else {
-			if ((ret = MyHGM->get_write_gtid_ctx(this, c_ctx.gtid_from_hostgroup)) == 0) {
+			if ((ret = MyHGM->get_write_gtid_ctx(this, c_ctx.hostgroup)) == 0) {
 				if (c_ctx.gtid[0] && !c_ctx.running) {
 					gtid_uuid = c_ctx.gtid;
 				}
 			} else if (ret == -1) {
-				Redis_Connection *rc = server_myds->rconn;
+				Redis_Connection *rc = mybe->server_myds->rconn;
 				proxy_warning("Something wrong on get write: redis conn %p status %d reply %p\n", rc, rc ? rc->status : 0, rc ? rc->reply : 0);
 				goto ear;
 			} else {
@@ -6611,6 +6612,7 @@ void MySQL_Session::handler___client_DSS_QUERY_SENT___server_DSS_NOT_INITIALIZED
 				}
 			}
 			uuid[n]='\0';
+			c19log("Check for gtid %s\n", gtid_uuid);
 			mc=thread->get_MyConn_local(mybe->hostgroup_id, this, uuid, trxid, -1);
 			local = mc ? true : false;
 			if (!mc) {
@@ -6635,6 +6637,7 @@ void MySQL_Session::handler___client_DSS_QUERY_SENT___server_DSS_NOT_INITIALIZED
 			}
 		}
 		if (mc && c_ctx.tokenid[0]) { // If we are in write ctx we release connection to poll or local thread
+			c19log("Save choosen server %s:%d\n", mc->parent->address, mc->parent->port);
 			c_ctx.srv = mc->parent; // First save choosen server to ctx
 			if (local) {
 				thread->push_MyConn_local(mc);
@@ -6655,7 +6658,7 @@ void MySQL_Session::handler___client_DSS_QUERY_SENT___server_DSS_NOT_INITIALIZED
 				thread->status_variables.ConnPool_get_conn_immediate++;
 			}
 		} else if (ret == -1) {
-			Redis_Connection *rc = server_myds->rconn;
+			Redis_Connection *rc = mybe->server_myds->rconn;
 			proxy_warning("Something wrong on validate: redis conn %p status %d reply %p\n", rc, rc ? rc->status : 0, rc ? rc->reply : 0);
 		} else {
 			return; // Still running

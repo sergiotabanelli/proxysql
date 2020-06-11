@@ -1,34 +1,37 @@
 # ProxySQL C19 Patch: Multi-master read/write consistency enforcing in MySQL asynchronous clusters 
->NOTE: This patch require [MySQL >= 5.7.6 with --session-track-gtids=OWN_GTID](https://dev.mysql.com/doc/refman//8.0/en/server-system-variables.html#sysvar_session_track_gtids) and at least one memcached protocol capable server, eg [memcached](https://memcached.org/), [couchbase](https://www.couchbase.com/) or also [mysql with the memcached plugin](https://dev.mysql.com/doc/refman/8.0/en/innodb-memcached-setup.html).
+>NOTE: This patch requires [MySQL >= 5.7.6 with --session-track-gtids=OWN_GTID](https://dev.mysql.com/doc/refman//8.0/en/server-system-variables.html#sysvar_session_track_gtids) and at least one [Redis server](https://redis.io/)
 
 >BEWARE: Right now this is still only a working POC, not more!
 
 >NOTE: Here is the original [README.md](./README.orig.md) from ProxySQL
 
-The Idea for this patch was born in 2019 when we start thinking a convenient method to extend, to languages other than PHP, the MySQL Consistency enforcement policy implemented in our [mymysqlnd_ms](https://github.com/sergiotabanelli/mysqlnd_ms/) fork, hence, from `Consistency` and `2019`, the name `C19`. Furthermore, during Covid 19 lock down and forced quarantine this first POC has been implemented, hence, from `Covid 19`, the name `C19`. Below a short rationale and getting started.
+The Idea for this patch was born in 2019 when we started thinking a convenient method to extend, to other languages than PHP, the MySQL Consistency enforcement policy implemented in our [mymysqlnd_ms](https://github.com/sergiotabanelli/mysqlnd_ms/) fork, hence, from `Consistency` and `2019`, the name `C19`. Furthermore, during Covid 19 lock down and forced quarantine this first POC has been implemented, hence, from `Covid 19`, the name `C19`. Below a short rationale and a getting started.
 
-Different types of MySQL cluster solutions offer different service and data consistency levels to their users. Any asynchronous MySQL replication cluster offers eventual consistency by default. A read executed on an asynchronous slave may return current, stale or no data at all, depending on whether the slave has replayed all changesets from master or not.
-Applications using a MySQL replication cluster need to be designed to work correctly with eventual consistent data. In most cases, however, stale data is not acceptable. In those cases only certain slaves or even only master are allowed to achieve the required quality of service from the cluster.
+Different types of MySQL cluster solutions offer different services and data consistency levels to their users. Any asynchronous MySQL replication cluster offers eventual consistency by default. A read executed on an asynchronous slave may return current, stale or no data at all, depending on whether the slave has replayed all changesets from master or not.
+Applications using a MySQL replication cluster need to be designed to work correctly with eventual consistent data. In most cases, however, stale data is not acceptable. In these cases only certain slaves or even only master are allowed to achieve the required quality of service from the cluster.
 
 New MySQL functionalities available in more recent versions, like [multi source replication](https://dev.mysql.com/doc/refman/5.7/en/replication-multi-source.html) or [group replication](https://dev.mysql.com/doc/refman/5.7/en/group-replication.html), allow multi-master clusters and need application strategies to avoid write conflicts and enforce write consistency for distinct write context partitions.
 
-The excellent [ProxySQL](https://proxysql.com) already has a [Consistent read feature](https://proxysql.com/blog/proxysql-gtid-causal-reads/) but it does not cross client connection boundaries and can't use consistency context partitions, that is: the consistency enforcement is limited to the current connection, but eg async web applications, where reads and writes are normaly on distinct http requests and, therefore, on distinct DB connectios, need a more complex read consistency enforcement policy. And also, `ProxySQL` does not have features for write conflicts management in multi-master asyncronous cluster scenarios. 
+The excellent [ProxySQL](https://proxysql.com) has already a [Consistent read feature](https://proxysql.com/blog/proxysql-gtid-causal-reads/) but it does not cross client connection boundaries and can't use consistency context partitions, that is: the consistency enforcement is limited to the current connection, but eg async web applications, where reads and writes are normaly on distinct http requests and, therefore, on distinct DB connections, need a more complex read consistency enforcement policy. And also, `ProxySQL` does not have features for write conflicts management in multi-master asyncronous cluster scenarios. 
 The `ProxySQL C19` patch adds these features to standard `ProxySQL` and can therefore transparently choose MySQL replication nodes according to the read and write requested consistency, and this also on distinct MySQL connections and also on connections spread across multiple `ProxySQL` instances. 
 
-To share consistency enforcement context info, the C19 patch, use memcached. Memcached can be considered not a valid choice due to its non persistent character, indeed, if the C19 patch loose connection to the memcached servers or consistency context stored on memcached keys become unavailable, no consistency will be enforced. To partially mitigate this issue and justify the choice we could consider that:
-* Memcached is extremely fast, really easy to setup and wildly known and used
-* There are alternatives that support memcached communication protocol with various degree of persistency functionalities
-* For consistent reads, sporadic enforcement failures due to memcached unavailability, can be considered acceptable
-* For consistent writes in multi master InnoDB clusters (group replication), enforcement failures, will not lead to replication breaks but only to a transaction rollback
-* For consistent writes in multi master multi source replication cluster, enforcement failures, can lead to replication breaks, for those cases a more robust memcached protocol capable server with persistency and HA functionalities like [couchbase](https://www.couchbase.com/) is suggested
+To share consistency enforcement context info, the C19 patch, uses Redis. Redis can be considered not a valid choice due to its non persistent character, indeed, if the C19 patch looses connection to the Redis server or if consistency context, stored on Redis keys, becomes unavailable, no consistency will be enforced. To partially mitigate this issue and justify the choice we could consider that:
+* Redis is extremely fast, really easy to setup and widely known and used
+* There are alternatives configurations with various degrees of persistency functionalities and HA, right now [Redis Cluster](https://redis.io/topics/cluster-tutorial) is not supported, but can be easily integrated in the near future.
+* For consistent reads, sporadic enforcement failures, due to Redis unavailability, can be considered acceptable
+* For consistent writes in multi master InnoDB clusters (group replication) enforcement failures will not lead to replication breaks but only to a transaction rollback
+* For consistent writes in multi master multi source replication cluster enforcement failures can lead to replication breaks, for those cases a more robust Redis configuration with persistency and HA functionalities is suggested
 * For future releases something like a fallback strategy could be implemented
-* For future releases memcached can also be used as shared query cache, this also considering that read consistency can be considered a perfect cache invalidation strategy, that is: every time a write occurs for that partition context, all cached queries belonging to that context could be invalidated
-* For future releases support for redis cache could be easily added
+* For future releases Redis can also be used as shared query cache, this also considering that read consistency can be considered a perfect cache invalidation strategy, that is: every time a write occurs for that partition context, all cached queries belonging to that context could be invalidated
+* Redis c library support async API and pipelines
+* Redis is extensible through custom modules and, to reduce latency, a [Redisc19](https://github.com/sergiotabanelli/redisc19) module for this patch has been developed 
 
-## Consistency context partitions
-Context partitions are sets of queries made by groups of clients (from here on 'participants') which need to share with each others the same configured isolated consistency context. With read consistency, a consistency context participant will read all writes made by other participants, itself included. With write consistency, in multi-master clusters, writes from all consistency context participants will always do not conflicts each others. Context partitions size can range from single query sent by a single client (eventual consistency) to global unique context partition which include all queries sent by all clients. Eventual consistency can indeed be considered as the smallest context partition, where every single query from every single client is a context partition. In asyncronous or semisyncronous clusters, smaller context partitions means better load distribution and performance. In `ProxySQL C19` patch context partitions are established through the use of placeholders. Placeholders are reserved tokens used in configuration values of the `memcached_hostgroups` `ProxySQL C19` table. The placeholder token will be expanded to the corresponding value at connection init, allowing consistency context establishment on a connection attribute basis (for a complete list see below). 
+Lets now start with a few concepts:
 
-## Read consistency
+## What we mean with `Consistency Context Partitions`
+Context partitions are sets of queries made by groups of clients (from here on 'participants') which need to share with each others the same configured isolated consistency context. With read consistency, a consistency context participant will read all writes made by other participants, itself included. With write consistency, in multi-master clusters, writes from all consistency context participants will always do not conflicts each others. Context partitions size can range from single query sent by a single client (eventual consistency) to global unique context partition which include all queries sent by all clients. Eventual consistency can indeed be considered as the smallest context partition, where every single query from every single client is a context partition. In asyncronous or semisyncronous clusters, smaller context partitions means better load distribution and performance. In `ProxySQL C19` patch context partitions are established through the use of placeholders. Placeholders are reserved tokens used in configuration values of the `c19_hostgroups` `ProxySQL C19` table. The placeholder token will be expanded to the corresponding value at connection init, allowing consistency context establishment on a connection attribute basis (for a complete list see below). 
+
+## What we mean with `Read Consistency`
 A read context partition is a set of application reads made by a context participant that must always at least run against previous writes made by all other context participants.  
 Starting from MySQL 5.7.6 the MySQL server features the [session-track-gtids](https://dev.mysql.com/doc/refman/5.7/en/server-system-variables.html#sysvar_session_track_gtids) system variable, which, if set, will allow a client to be aware of the unique Global Transaction Identifier ([GTID](https://dev.mysql.com/doc/refman/5.7/en/replication-gtids.html)) assigned by MySQL to an executed transaction. This extremely useful feature allow clients to enforce consistency also on an application context basis, that is: a web application user normally does not need to stay perfectly in sync with writes made by another user, if userA add a record and userB add another record, there is no problem if userA does not immediately see record inserted by userB but problems arise when userA does not see his record!
 
@@ -49,7 +52,7 @@ $query = '/* c19_key=' . session_id() . '*/' . 'SELECT * FROM myrealquery';
 ```
 This allow application users to always read them writes also if made in different connections and also if distributed on different application servers. Especially in async ajax scenarios, where reads and writes are often made on distinct http requests, user session partitioning is of great value and allow transparent migration to MySQL asyncronous clusters in almost all use cases with no or at most extremely small effort and application changes.   
 
-## Write consistency
+## What we mean with `Write Consistency`
 New MySQL functionalities like [multi source replication](https://dev.mysql.com/doc/refman/8.0/en/replication-multi-source.html) or [group replication](https://dev.mysql.com/doc/refman/8.0/en/group-replication.html) allow multi-master clusters and need application strategies to avoid write conflicts and enforce write consistency for distinct write context partitions. A write context partition is a set of application writes that, if run on distinct masters, can potentially conflict each others but that do not conflict with write sets from all other defined partitions. 
 
 It is widely known that adding masters to MySQL clusters does not scale out and does not increase write performance, that is because all masters replicate the same amount of data, so write load will be repeated on every master. However, given that other masters do not have to do the same amount of processing that the original master had to do when it originally executed the transaction, they apply the changes faster, transactions are replicated in a format that is used to apply row transformations only, without having to re-execute transactions again. There are also much more to take into account for clusters configurations, in practice distinct write queries sent to distinct masters will almost always have better total throughput then the same group of queries sent to a single master (as an example see [an overview of the Group Replication performance](https://mysqlhighavailability.com/an-overview-of-the-group-replication-performance/) multi-master peak with flow-control disabled). So the major obstacles to achieve a certain degree of writes scale-out are write conflicts and replication lag. The idea behind the `C19 patch` and [mymysqlnd_ms](https://github.com/sergiotabanelli/mysqlnd_ms/) fork write consistency implementation is to move replication lag and write conflicts management to the ProxySQL balancer, that can be considered a far more easier scale-out resource. To summarize the C19 patch write consistency implementation tries to put loads on easier scalable front ends with the objective to enhance response time on much harder scalable back ends.
@@ -71,7 +74,7 @@ Clone the repository, go to the cloned directory, if you want, take a quick look
 * the `myt` run for first parameter times a group of query of 1 insert, one select of the previous insert, 2 updates that if executed in backgroung with another `myt` execution will conflicts each other. For every single query it invokes the `my` script
 * the `mytt` runs second parameter background instances of the `myt` script each one against a distinct user session id
 * the `myttt` runs third parameter background instances of the `mytt` script each one against a distinct ProxySQL instance 
-* `docker-compose.gr.yml` runs 3 MySQL group replication nodes each one with ProxySQL binlog reader installed, 1 memcached instance and 2 ProxySQL with C19 patch instances 
+* `docker-compose.gr.yml` runs 3 MySQL group replication nodes each one with ProxySQL binlog reader installed, 1 redis instance, with [redisc19 module](https://github.com/sergiotabanelli/redisc19), and 2 ProxySQL with C19 patch instances 
 * `proxysql.c19.sql` is the sql script used to initialize ProxySQL instance according to the `docker-compose.gr.yml` running context
 
 run the docker-compose.gr.yml, wait some time until all the containers has finish the entrypoints startup, and then run:
@@ -98,13 +101,13 @@ Go to the directory where you cloned the repo (or unpacked the tarball) and run:
 make
 sudo make install
 ```
-the patch add a new table named `memcached_hostgroups` to the main ProxySQL schema:
+the patch add a new table named `c19_hostgroups` to the main ProxySQL schema:
 
 ```
-Admin>SHOW CREATE TABLE memcached_hostgroups\G
+Admin>SHOW CREATE TABLE c19_hostgroups\G
 *************************** 1. row ***************************
-       table: memcached_hostgroups
-Create Table: CREATE TABLE memcached_hostgroups (
+       table: c19_hostgroups
+Create Table: CREATE TABLE c19_hostgroups (
     hostgroup INT CHECK (hostgroup>=0) NOT NULL PRIMARY KEY,
     connection_string VARCHAR NOT NULL, depth INT NOT NULL DEFAULT 20 CHECK (depth>0),
     reader_key VARCHAR NOT NULL DEFAULT ('#S'),
@@ -118,13 +121,13 @@ Create Table: CREATE TABLE memcached_hostgroups (
 The most important fields are :
 
 * `hostgroup`: this field hold the id of the hostgroup for witch the read and write consistency will be enforced 
-* `connection_string`: this is the connection string used for memcached servers, format is described in [libmemcached](http://docs.libmemcached.org/libmemcached_configuration.html)
+* `connection_string`: this is the connection string used for Redis connection, right now format is `host:port`, in future release support for connection string for Redis Cluster will be added
 * `depth`: this is the max number of concurrent query You expect for the write partitioned context, default is 20 
 * `reader_key`: this is the key that identify the read context partition, normally contains a placeholder (see below), default value is `#S` that is the placeholder for the user session id 
 * `writer_key`: this is the key that identify the write context partition, normally contains a placeholder (see below), it is used only if the hostgroup is multi-master and normally will be set to `#U` that is the placeholder for the MySQL connected user
-* `ttl`: this is the time to live for memcached keys, default is 3600 seconds
+* `ttl`: this is the time to live for Redis keys, default is 3600 seconds
 
-Let's now configure taking as example the multi-master InnoDB cluster and memcached server run by `docker-compose.gr.yml`, so run the compose file and wait until all entrypoints are executed (on my small macbook air around 30 seconds).
+Let's now configure taking as example the multi-master InnoDB cluster and Redis server run by `docker-compose.gr.yml`, so run the compose file and wait until all entrypoints are executed (on my small macbook air around 30 seconds).
 
 Connect to the admin port:
 ```
@@ -143,9 +146,9 @@ Admin>INSERT INTO "mysql_servers"(hostgroup_id,hostname,port,gtid_port) VALUES(1
 Query OK, 1 row affected (0,00 sec)
 ```
 
-Then we add a mecached_hostgroups record for hostgroup 1 that will enforce a read consistency partitioned by user session id and a write consistency partitioned by MySQL users
+Then we add a c19_hostgroups record for hostgroup 1 that will enforce a read consistency partitioned by user session id and a write consistency partitioned by MySQL users
 ```
-Admin>INSERT INTO "memcached_hostgroups"(hostgroup,connection_string,reader_key,writer_key) VALUES(1,'--SERVER=memcached --POOL-MIN=10 --POOL-MAX=100','#S','#U');
+Admin>INSERT INTO "c19_hostgroups"(hostgroup,connection_string,reader_key,writer_key) VALUES(1,'redisc19','#S','#U');
 Query OK, 1 row affected (0,02 sec)
 ```
 Then we add the user that for this example will be `root`, obviously do not use root in environment other than tests and examples containers
@@ -256,13 +259,14 @@ done
 
 ## Placeholders
 
-Here is the list of placeholders that can be used for the `reader_key` and `writer_key` fields of the `memcached_hostgroups` table:
+Here is the list of placeholders that can be used for the `reader_key` and `writer_key` fields of the `c19_hostgroups` table:
 
 * `#S` is for session id passed through the MySQL connected user eg in `root#pippo` `pippo` will be the session id
 * `#U` is for the MySQL connected user eg in `root#pippo` `root` is the effective MySQL connection user
 * `#D` is for the MySQL selected schema at connection time
+* `#W` is for a secondary write session id that can be used to add more precision and granularity to write context partitioning, indeed a second fragment can be added to the MySQL connecting user, that is: in `root#pippo#pluto`, `pippo` will be the session id, referenced by the previous described `#S` placeholder, and `pluto` will be the secondary session id, referenced by the currently described `#W` placeholder. Remember that small write context partitions means better load distribution and performance.
 
 ## Status
 
->NOTE: This PATCH is in early development stage, if You find bugs or have any question open issue on github. Right now the `active` field of `memcached_hostgroups` table has no effect and memcached hostgroups can be changed runtime not safely, that is: change it, save to disk and restart ProxySQL 
+>NOTE: This PATCH is in early development stage, if You find bugs or have any question open issue on github. Right now the `active` field of `c19_hostgroups` table has no effect and c19 hostgroups can be changed runtime not safely, that is: change it, save to disk and restart ProxySQL 
 

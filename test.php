@@ -1,12 +1,6 @@
 <?php
-date_default_timezone_set('UTC');
-$mysqli = new mysqli('127.0.0.1', 'root#pippo1', 'password', 'test', 6033);
-if ($mysqli->connect_error) {
-    die('Connect Error (' . $mysqli->connect_errno . ') '
-            . $mysqli->connect_error);
-}
-echo date('Y-m-d H:i:s') . " Starting to SETUP the test\n";
-for ($i=0; $i<100; $i++)
+require_once('tinc.php');
+for ($i=0; $i<200; $i++)
 {
     $mysqli->query("INSERT INTO test VALUES (NULL, uuid(), now(), $i)");
     $id = $mysqli->insert_id;

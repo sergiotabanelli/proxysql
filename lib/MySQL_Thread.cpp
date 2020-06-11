@@ -162,7 +162,11 @@ void ProxySQL_Poll::add(uint32_t _events, int _fd, MySQL_Data_Stream *_myds, uns
 	fds[len].fd=_fd;
 	fds[len].events=_events;
 	fds[len].revents=0;
+#ifdef PROXYSQLC19
+	if (_myds && (!_myds->rconn || !_myds->rconn->ac || _myds->rconn->ac->c.fd != _fd)) {
+#else
 	if (_myds) {
+#endif
 		_myds->mypolls=this;
 		_myds->poll_fds_idx=len;  // fix a serious bug
 	}
@@ -173,12 +177,18 @@ void ProxySQL_Poll::add(uint32_t _events, int _fd, MySQL_Data_Stream *_myds, uns
 
 void ProxySQL_Poll::remove_index_fast(unsigned int i) {
 	if ((int)i==-1) return;
+#ifdef PROXYSQLC19
+	if (!myds[i]->rconn || !myds[i]->rconn->ac || myds[i]->rconn->ac->c.fd != fds[i].fd) // If it is a Redis fd we don't touch poll_fds_idx
+#endif
 	myds[i]->poll_fds_idx=-1; // this prevents further delete
 	if (i != (len-1)) {
 		myds[i]=myds[len-1];
 		fds[i].fd=fds[len-1].fd;
 		fds[i].events=fds[len-1].events;
 		fds[i].revents=fds[len-1].revents;
+#ifdef PROXYSQLC19
+		if (!myds[i]->rconn || !myds[i]->rconn->ac || myds[i]->rconn->ac->c.fd != fds[i].fd) // If it is a Redis fd we don't touch poll_fds_idx
+#endif
 		myds[i]->poll_fds_idx=i;  // fix a serious bug
 		last_recv[i]=last_recv[len-1];
 		last_sent[i]=last_sent[len-1];
@@ -3864,7 +3874,11 @@ __mysql_thread_exit_add_mirror:
 			MySQL_Data_Stream *myds=NULL;
 			myds=mypolls.myds[n];
 			mypolls.fds[n].revents=0;
+#ifdef PROXYSQLC19
+			if (myds && (!myds->rconn || !myds->rconn->ac || myds->rconn->ac->c.fd != mypolls.fds[n].fd)) {
+#else
 			if (myds) {
+#endif
 #ifdef IDLE_THREADS
 				if (GloVars.global.idle_threads) {
 					// here we try to move it to the maintenance thread
@@ -4211,8 +4225,13 @@ __run_skip_1a:
 #endif // IDLE_THREADS
 
 		for (n = 0; n < mypolls.len; n++) {
+#ifdef PROXYSQLC19
+goback:
+			if (mypolls.myds[n] && mypolls.myds[n]->rconn && mypolls.myds[n]->rconn->ac && mypolls.myds[n]->rconn->ac->c.fd == mypolls.fds[n].fd) {
+				c19log("Mypolls fd %d events %d revents %d\n", mypolls.fds[n].fd, mypolls.fds[n].events, mypolls.fds[n].revents);
+			}
+#endif
 			proxy_debug(PROXY_DEBUG_NET,3, "poll for fd %d events %d revents %d\n", mypolls.fds[n].fd , mypolls.fds[n].events, mypolls.fds[n].revents);
-
 			MySQL_Data_Stream *myds=mypolls.myds[n];
 			if (myds==NULL) {
 				if (mypolls.fds[n].revents) {
@@ -4269,8 +4288,17 @@ __run_skip_1a:
 				}
 #ifdef PROXYSQLC19
 				if (myds->rconn && myds->rconn->ac && myds->rconn->ac->c.fd == mypolls.fds[n].fd) {
+					myds->rconn->revents=mypolls.fds[n].revents; 
 					myds->rconn->event_handler(mypolls.fds[n].revents);
-					myds->sess->to_process=1;
+					if (!myds->rconn) { // TODO: Bad design! If handled event has closed and deleted the redis connection we go back one step
+						if (n < mypolls.len) {
+							c19log("Redis connection destroyed, go back one step!\n");
+							goto goback; // Horrible hack
+						}
+					} else {
+						mypolls.fds[n].revents=0;
+						myds->sess->to_process=1;
+					}
 					continue;
 				}
 #endif			
@@ -4596,8 +4624,15 @@ void MySQL_Thread::process_all_sessions() {
 			n--;
 			delete sess;
 		} else {
-			if (sess->to_process==1) {
+			if (sess->to_process==1) {			
 				if (sess->pause_until <= curtime) {
+#ifdef PROXYSQLC19NO
+					Redis_Connection *rconn = sess->server_myds->rconn ? sess->server_myds->rconn->revents : sess->client_myds->rconn;
+					if (rconn && rconn->ac && rconn->revents) {
+						rconn->event_handler(rconn->revents);
+					}
+#endif			
+					
 					rc=sess->handler();
 					//total_active_transactions_+=sess->active_transactions;
 					if (rc==-1 || sess->killed==true) {

@@ -10,4 +10,8 @@ if [ -z "$3" ]; then
 else
     S="$3"
 fi
-MYSQL_PWD=password mysql -u "root#$SI" -h 127.0.0.1 -P"${S}6033" -B -N -s -e "$1"
+if [ -z "$C19_IP" ]; then
+    C19_IP='127.0.0.1'
+fi
+#MYSQL_PWD=password mysql -u "root#$SI" -h 127.0.0.1 -P"${S}6033" -B -N -s -e "$1"
+MYSQL_PWD=password mysql -u "root#$SI" -h "$C19_IP" -P"${S}6033" -B -N -s -e "$1"
