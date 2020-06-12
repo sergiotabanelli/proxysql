@@ -54,10 +54,11 @@ services:
         source: ./docker/mysql/conf.gr.d
         target: /etc/mysql/conf.d
         consistency: delegated
-  memcached:
-    image: memcached
+  redisc19:
+    image: sergiotabanelli/redisc19
+    command: [ "redis-server", "--loadmodule", "/proxysqlc19.so" ]
     ports:
-      - "11211:11211"
+      - "6379:6379"
   proxysqlc19-1:
     image: sergiotabanelli/proxysqlc19
     ports:

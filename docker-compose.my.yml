@@ -54,8 +54,9 @@ services:
         source: ./docker/mysql/conf.gr.d
         target: /etc/mysql/conf.d
         consistency: delegated
-  memcached:
-    image: memcached
+  redisc19:
+    image: redisc19
+    command: [ "redis-server", "--loadmodule", "/proxysqlc19.so" ]
   c19build:
     image: c19build-centos7
     environment:

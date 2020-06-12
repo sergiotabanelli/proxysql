@@ -1,9 +1,9 @@
 # ProxySQL C19 Patch: Multi-master read/write consistency enforcing in MySQL asynchronous clusters 
 >NOTE: This patch requires [MySQL >= 5.7.6 with --session-track-gtids=OWN_GTID](https://dev.mysql.com/doc/refman//8.0/en/server-system-variables.html#sysvar_session_track_gtids) and at least one [Redis server](https://redis.io/)
 
->BEWARE: Right now this is still only a working POC, not more!
+>NOTE: This patch is not really meant to be an alternative to ProxySQL. We strongly hope to merge to origin repository! If and when the ProxySQL team will evaluate these features useful to ProxySQL users community. Here is the origin [README.md](./README.orig.md) from ProxySQL
 
->NOTE: Here is the original [README.md](./README.orig.md) from ProxySQL
+>BEWARE: Right now this is still a working POC, not more!
 
 The Idea for this patch was born in 2019 when we started thinking a convenient method to extend, to other languages than PHP, the MySQL Consistency enforcement policy implemented in our [mymysqlnd_ms](https://github.com/sergiotabanelli/mysqlnd_ms/) fork, hence, from `Consistency` and `2019`, the name `C19`. Furthermore, during Covid 19 lock down and forced quarantine this first POC has been implemented, hence, from `Covid 19`, the name `C19`. Below a short rationale and a getting started.
 
