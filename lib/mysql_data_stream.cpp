@@ -1436,7 +1436,6 @@ static redisReply *dupReplyObject(redisReply* reply) {
         r->str = (char*)malloc(reply->len+1);
         memcpy(r->str, reply->str, reply->len);
         r->str[reply->len] = '\0';
-		c19log1("Redis reply item %s\n", r->str);
     }
     else if(REDIS_REPLY_ARRAY==reply->type) //copy array
     {
