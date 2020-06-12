@@ -26,20 +26,20 @@ To share consistency enforcement context info, the C19 patch, uses Redis. Redis 
 * Redis c library support async API and pipelines
 * Redis is extensible through custom modules and, to reduce latency, a [Redisc19](https://github.com/sergiotabanelli/redisc19) module for this patch has been developed 
 
-Lets now start with a few concepts:
+Let's now start with a few concepts:
 
 ## What we mean with `Consistency Context Partitions`
-Context partitions are sets of queries made by groups of clients (from here on 'participants') which need to share with each others the same configured isolated consistency context. With read consistency, a consistency context participant will read all writes made by other participants, itself included. With write consistency, in multi-master clusters, writes from all consistency context participants will always do not conflicts each others. Context partitions size can range from single query sent by a single client (eventual consistency) to global unique context partition which include all queries sent by all clients. Eventual consistency can indeed be considered as the smallest context partition, where every single query from every single client is a context partition. In asyncronous or semisyncronous clusters, smaller context partitions means better load distribution and performance. In `ProxySQL C19` patch context partitions are established through the use of placeholders. Placeholders are reserved tokens used in configuration values of the `c19_hostgroups` `ProxySQL C19` table. The placeholder token will be expanded to the corresponding value at connection init, allowing consistency context establishment on a connection attribute basis (for a complete list see below). 
+Context partitions are sets of queries made by groups of clients (from now on 'participants') which need to share with each others the same isolated consistency context. With read consistency, a consistency context participant will read all writes made by other participants, itself included. With write consistency, in multi-master clusters, writes from all consistency context participants will not conflict with each others. Context partitions size can range from single query sent by a single client (eventual consistency) to global unique context partition which include all queries sent by all clients. Eventual consistency can indeed be considered as the smallest context partition, where every single query from every single client is a context partition. In asyncronous or semisyncronous clusters, smaller context partitions means better load distribution and performance. In `ProxySQL C19` patch context partitions are established through the use of placeholders. Placeholders are reserved tokens used in configuration values of the `c19_hostgroups` `ProxySQL C19` table. The placeholder token will be expanded to the corresponding value at connection init, allowing consistency context establishment on a connection attribute basis (for a complete list see below). 
 
 ## What we mean with `Read Consistency`
 A read context partition is a set of application reads made by a context participant that must always at least run against previous writes made by all other context participants.  
-Starting from MySQL 5.7.6 the MySQL server features the [session-track-gtids](https://dev.mysql.com/doc/refman/5.7/en/server-system-variables.html#sysvar_session_track_gtids) system variable, which, if set, will allow a client to be aware of the unique Global Transaction Identifier ([GTID](https://dev.mysql.com/doc/refman/5.7/en/replication-gtids.html)) assigned by MySQL to an executed transaction. This extremely useful feature allow clients to enforce consistency also on an application context basis, that is: a web application user normally does not need to stay perfectly in sync with writes made by another user, if userA add a record and userB add another record, there is no problem if userA does not immediately see record inserted by userB but problems arise when userA does not see his record!
+Starting from MySQL 5.7.6 the MySQL server features the [session-track-gtids](https://dev.mysql.com/doc/refman/5.7/en/server-system-variables.html#sysvar_session_track_gtids) system variable, which, if set, will allow a client to be aware of the unique Global Transaction Identifier ([GTID](https://dev.mysql.com/doc/refman/5.7/en/replication-gtids.html)) assigned by MySQL to an executed transaction. This extremely useful feature allows clients to enforce consistency also on an application context basis, that is: a web application user normally does not need to stay perfectly in sync with writes made by another user. If userA add a record and userB add another record, there is no problem if userA does not immediately see record inserted by userB but problems arise when userA does not see his record!
 
 C19 read consistency has following rules: 
 * Reads belonging to a context partition can safely run only on cluster nodes that have already replicated all previous same context partition writes. 
 * Reads belonging to a context partition can safely run on cluster nodes that still have not replicated writes from all other contexts.
 
-For read consistency the most common scenarios is context partitioning on HTTP user session id. With [mymysqlnd_ms](https://github.com/sergiotabanelli/mysqlnd_ms/) plugin, this can be easily achieved accessing the PHP internal session id, this because the plugin is an extension of the PHP language, but for ProxySQL there is no means to directly access an http application session id. The C19 patch use a simple hack to workaround this limitation at the cost of a small and simple web application change, the hack is that every MySQL user that connect to ProxySQL C19 can have a trailing session id identifying the session id and therefore the needed read consistency context, that is: suppose that the mysql user used by your web application is `SQLmyapp`, than you can append the session id to the MySQL user separated by `#`, eg in PHP
+For read consistency the most common scenario is context partitioning on HTTP user session id. With [mymysqlnd_ms](https://github.com/sergiotabanelli/mysqlnd_ms/) plugin, this can be easily achieved accessing the PHP internal session id, this because the plugin is an extension of the PHP language, but for ProxySQL there is no mean to directly access an http application session id. The C19 patch uses a simple hack to workaround this limitation at the cost of a small and simple web application change. The hack is that every MySQL user that connect to ProxySQL C19 can have a trailing session id identifying the session id and therefore the needed read consistency context, that is: suppose that the mysql user used by your web application is `SQLmyapp`, than you can append the session id to the MySQL user separated by `#`, eg in PHP
 
 ```
 $sqluser = 'SQLmyapp' . '#' . session_id();
@@ -50,16 +50,16 @@ Another method is to supply the session id in the query as a comment, eg
 ```
 $query = '/* c19_key=' . session_id() . '*/' . 'SELECT * FROM myrealquery';
 ```
-This allow application users to always read them writes also if made in different connections and also if distributed on different application servers. Especially in async ajax scenarios, where reads and writes are often made on distinct http requests, user session partitioning is of great value and allow transparent migration to MySQL asyncronous clusters in almost all use cases with no or at most extremely small effort and application changes.   
+This allows application users to always read their writes also if made in different connections and also if distributed on different application servers. Especially in async ajax scenarios, where reads and writes are often made on distinct http requests, user session partitioning is of great value and allows transparent migration to MySQL asyncronous clusters in almost all use cases with no or extremely small effort and application changes.   
 
 ## What we mean with `Write Consistency`
-New MySQL functionalities like [multi source replication](https://dev.mysql.com/doc/refman/8.0/en/replication-multi-source.html) or [group replication](https://dev.mysql.com/doc/refman/8.0/en/group-replication.html) allow multi-master clusters and need application strategies to avoid write conflicts and enforce write consistency for distinct write context partitions. A write context partition is a set of application writes that, if run on distinct masters, can potentially conflict each others but that do not conflict with write sets from all other defined partitions. 
+New MySQL functionalities like [multi source replication](https://dev.mysql.com/doc/refman/8.0/en/replication-multi-source.html) or [group replication](https://dev.mysql.com/doc/refman/8.0/en/group-replication.html) allow multi-master clusters and need application strategies to avoid write conflicts and enforce write consistency for distinct write context partitions. A write context partition is a set of application writes that, if run on distinct masters, can potentially conflict with each others but that do not conflict with write sets from all other defined partitions. 
 
-It is widely known that adding masters to MySQL clusters does not scale out and does not increase write performance, that is because all masters replicate the same amount of data, so write load will be repeated on every master. However, given that other masters do not have to do the same amount of processing that the original master had to do when it originally executed the transaction, they apply the changes faster, transactions are replicated in a format that is used to apply row transformations only, without having to re-execute transactions again. There are also much more to take into account for clusters configurations, in practice distinct write queries sent to distinct masters will almost always have better total throughput then the same group of queries sent to a single master (as an example see [an overview of the Group Replication performance](https://mysqlhighavailability.com/an-overview-of-the-group-replication-performance/) multi-master peak with flow-control disabled). So the major obstacles to achieve a certain degree of writes scale-out are write conflicts and replication lag. The idea behind the `C19 patch` and [mymysqlnd_ms](https://github.com/sergiotabanelli/mysqlnd_ms/) fork write consistency implementation is to move replication lag and write conflicts management to the ProxySQL balancer, that can be considered a far more easier scale-out resource. To summarize the C19 patch write consistency implementation tries to put loads on easier scalable front ends with the objective to enhance response time on much harder scalable back ends.
+It is widely known that adding masters to MySQL clusters does not scale out and does not increase write performance. That is because all masters replicate the same amount of data, so write load will be repeated on every master. However, given that other masters do not have to do the same amount of processing that the original master had to do when it originally executed the transaction, they apply the changes faster, transactions are replicated in a format that is used to apply row transformations only, without having to re-execute transactions again. There is also much more to take into account for clusters configurations. In practice distinct write queries sent to distinct masters will almost always have better total throughput then the same group of queries sent to a single master (as an example see [an overview of the Group Replication performance](https://mysqlhighavailability.com/an-overview-of-the-group-replication-performance/) multi-master peak with flow-control disabled). So the major obstacles to achieve a certain degree of writes scale-out are write conflicts and replication lag. The idea behind the `C19 patch` and [mymysqlnd_ms](https://github.com/sergiotabanelli/mysqlnd_ms/) fork write consistency implementation is to move replication lag and write conflicts management to the ProxySQL balancer, that can be considered a far more easier scale-out resource. To summarize the C19 patch write consistency implementation tries to put loads on easier scalable front ends with the objective to enhance response time on much harder scalable back ends.
 
 For write consistency, write context partition scenarios strictly depend from your application requirements and can range from write context partitioning on MySQL user, the most common, to context partitioning on a user session basis as for the above explained read consistency.
 
->BEWARE: distinct write sets partitions must not intersect each others. eg if a write set include all writes to table A, no other write set partition should include writes to table A.
+>BEWARE: distinct write sets partitions must not intersect with each others. eg if a write set include all writes to table A, no other write set partition should include writes to table A.
 
 Server side write consistency has following rules: 
 * Writes belonging to distinct context partitions can safely run concurrently on distinct MySQL masters without any data conflicts and replication issues.
@@ -70,14 +70,14 @@ Server side write consistency has following rules:
 
 Clone the repository, go to the cloned directory, if you want, take a quick look at `my`, `myt`, `mytt`, `myttt`, `docker-compose.gr.yml` and `proxysql.c19.sql`
 
-* the `my` script simply invoke mysql client with query passed as first parameter, user session id as second parameter and ProxySQL port prefixed with third parameter
-* the `myt` run for first parameter times a group of query of 1 insert, one select of the previous insert, 2 updates that if executed in backgroung with another `myt` execution will conflicts each other. For every single query it invokes the `my` script
-* the `mytt` runs second parameter background instances of the `myt` script each one against a distinct user session id
-* the `myttt` runs third parameter background instances of the `mytt` script each one against a distinct ProxySQL instance 
+* the `my` script simply invokes mysql client with query passed as first parameter, user session id as second parameter and ProxySQL port prefixed with third parameter
+* the `myt` script runs for first parameter times a group of query of 1 insert, one select of the previous insert, 2 updates that if executed in background with another `myt` execution will conflict with each other. For every single query it invokes the `my` script
+* the `mytt` script runs second parameter background instances of the `myt` script each one against a distinct user session id
+* the `myttt` script runs third parameter background instances of the `mytt` script each one against a distinct ProxySQL instance 
 * `docker-compose.gr.yml` runs 3 MySQL group replication nodes each one with ProxySQL binlog reader installed, 1 redis instance, with [redisc19 module](https://github.com/sergiotabanelli/redisc19), and 2 ProxySQL with C19 patch instances 
 * `proxysql.c19.sql` is the sql script used to initialize ProxySQL instance according to the `docker-compose.gr.yml` running context
 
-run the docker-compose.gr.yml, wait some time until all the containers has finish the entrypoints startup, and then run:
+run the docker-compose.gr.yml, wait some time until all the containers has finished the entrypoints startup, and then run:
 
 ```
 mysql -u radmin -pradmin -h 127.0.0.1 -P16032 <proxysql.c19.sql
@@ -89,11 +89,11 @@ And then run:
 ```
 ./myttt 50 5 2
 ```
-you can change the first and second parameter but not third because `docker-compose.gr.yml` has only 2 instances of ProxySQL C19 patch
+you can change the first and second parameter but not the third because `docker-compose.gr.yml` has only 2 instances of ProxySQL C19 patch
 
 ## Getting started
 
-Right now, to build the C19 patch, You must clone the repository and run the ProxySQL build steps, all PRoxySQL standard Makefile targets should work, distribution package build targets included
+Right now, to build the C19 patch, you must clone the repository and run the ProxySQL build steps, all PRoxySQL standard Makefile targets should work, distribution package build targets included
 
 Go to the directory where you cloned the repo (or unpacked the tarball) and run:
 
@@ -120,11 +120,11 @@ Create Table: CREATE TABLE c19_hostgroups (
 ```
 The most important fields are :
 
-* `hostgroup`: this field hold the id of the hostgroup for witch the read and write consistency will be enforced 
+* `hostgroup`: this field hold the id of the hostgroup for which the read and write consistency will be enforced 
 * `connection_string`: this is the connection string used for Redis connection, right now format is `host:port`, in future release support for connection string for Redis Cluster will be added
 * `depth`: this is the max number of concurrent query You expect for the write partitioned context, default is 20 
-* `reader_key`: this is the key that identify the read context partition, normally contains a placeholder (see below), default value is `#S` that is the placeholder for the user session id 
-* `writer_key`: this is the key that identify the write context partition, normally contains a placeholder (see below), it is used only if the hostgroup is multi-master and normally will be set to `#U` that is the placeholder for the MySQL connected user
+* `reader_key`: this is the key that identifies the read context partition, normally contains a placeholder (see below), default value is `#S` that is the placeholder for the user session id 
+* `writer_key`: this is the key that identifies the write context partition, normally contains a placeholder (see below), it is used only if the hostgroup is multi-master and normally will be set to `#U` that is the placeholder for the MySQL connected user
 * `ttl`: this is the time to live for Redis keys, default is 3600 seconds
 
 Let's now configure taking as example the multi-master InnoDB cluster and Redis server run by `docker-compose.gr.yml`, so run the compose file and wait until all entrypoints are executed (on my small macbook air around 30 seconds).
@@ -156,7 +156,7 @@ Then we add the user that for this example will be `root`, obviously do not use 
 Admin>INSERT INTO "mysql_users"(username,password,default_hostgroup) VALUES('root','password',1);
 Query OK, 1 row affected (0,02 sec)
 ```
-Then we add the query rules, for this scenario we need one, that will identify query that will need read consistency enforcement or queries that for sure will not concurrently conflicts each other,  all the others query will be assumed to need write consistency enforcement. As for standard ProxySQL the C19 patch identify read consistency query if it match a query rule with a valid `gtid_from_hostgroup` field, we also set `multiplex` to `2` because we don't want multiplex disabled for queries with `@` in the digest.
+Then we add the query rules, for this scenario we need one, that will identify query that will need read consistency enforcement or queries that for sure will not concurrently conflict with each other,  all the others queries will be assumed to need write consistency enforcement. As for standard ProxySQL the C19 patch identify read consistency query if it matches a query rule with a valid `gtid_from_hostgroup` field, we also set `multiplex` to `2` because we don't want multiplex disabled for queries with `@` in the digest.
 ```
 Admin>INSERT INTO mysql_query_rules(rule_id,active,match_digest,destination_hostgroup,multiplex,gtid_from_hostgroup,apply) VALUES(1,1,'^SELECT',1,2,1,1);
 Query OK, 1 row affected (0,05 sec)
@@ -255,7 +255,7 @@ mysql -u root#pippo2 -ppassword -h 127.0.0.1 -P16032 -B -N -s -e "UPDATE test.te
 mysql -u root#pippo1 -ppassword -h 127.0.0.1 -P26032 -B -N -s -e "UPDATE test.test SET g = g - 1 WHERE g = 2" &
 done
 ```
->NOTE: For the above steps as well for those from the `A quick look` section You can experience some sporadic **read** consistency errors, i lab this issue and found that it is probably related to the **push** method used by ProxySQL to collect gtid through the ProxySQL binlog reader. That is: when a gtid transaction is written to the MySQL binary log, can happen that this transaction still is not available to connections and the gtid_executed still miss that gtid. Probably this issue can be solved only changing from **push** to **pull** method for gtid_executed retrieval.
+>NOTE: For the above steps as well for those from the `A quick look` section You can experience some sporadic **read** consistency errors, i lab this issue and found that it is probably related to the **push** method used by ProxySQL to collect gtid through the ProxySQL binlog reader. That is: when a gtid transaction is written to the MySQL binary log, it can happen that this transaction is still not available to connections and the gtid_executed still misses that gtid. Probably this issue can be solved only by changing from **push** to **pull** method for gtid_executed retrieval.
 
 ## Placeholders
 
@@ -264,9 +264,9 @@ Here is the list of placeholders that can be used for the `reader_key` and `writ
 * `#S` is for session id passed through the MySQL connected user eg in `root#pippo` `pippo` will be the session id
 * `#U` is for the MySQL connected user eg in `root#pippo` `root` is the effective MySQL connection user
 * `#D` is for the MySQL selected schema at connection time
-* `#W` is for a secondary write session id that can be used to add more precision and granularity to write context partitioning, indeed a second fragment can be added to the MySQL connecting user, that is: in `root#pippo#pluto`, `pippo` will be the session id, referenced by the previous described `#S` placeholder, and `pluto` will be the secondary session id, referenced by the currently described `#W` placeholder. Remember that small write context partitions means better load distribution and performance.
+* `#W` is for a secondary write session id that can be used to add more accuracy and granularity to write context partitioning. Indeed a second fragment can be added to the MySQL connecting user, that is: in `root#pippo#pluto`, `pippo` will be the session id, referenced by the previous described `#S` placeholder, and `pluto` will be the secondary session id, referenced by the currently described `#W` placeholder. Remember that small write context partitions mean better load distribution and performance.
 
 ## Status
 
->NOTE: This PATCH is in early development stage, if You find bugs or have any question open issue on github. Right now the `active` field of `c19_hostgroups` table has no effect and c19 hostgroups can be changed runtime not safely, that is: change it, save to disk and restart ProxySQL 
+>NOTE: This PATCH is in an early development stage. If You find bugs or have any question, open an issue on github. Right now the `active` field of `c19_hostgroups` table has no effect and c19 hostgroups can be changed at runtime, but not safely, that is: change it, save to disk and restart ProxySQL 
 

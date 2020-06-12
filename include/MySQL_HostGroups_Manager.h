@@ -261,7 +261,7 @@ class AWS_Aurora_Info {
 };
 
 #ifdef PROXYSQLC19
-#define MAX_IDSIZE 128
+#define MAX_IDSIZE 64
 #define C19_CLOSED_MARKER "#E"
 #define C19_VALUE_MARKER "|"
 #define P_USID 'S'
@@ -274,8 +274,8 @@ typedef struct consistency_ctx
 {
 	int hostgroup;
 	char gtid[MAX_IDSIZE];
-	char rkey[MAX_IDSIZE/2];
-	char wkey[MAX_IDSIZE/2];
+	char rkey[MAX_IDSIZE];
+	char wkey[MAX_IDSIZE];
 	char tokenid[MAX_IDSIZE/2];
 	char previd[MAX_IDSIZE/2];
 	MySrvC *srv;

@@ -6650,18 +6650,20 @@ void MySQL_Session::handler___client_DSS_QUERY_SENT___server_DSS_NOT_INITIALIZED
 		}
 	}
 	if (c_ctx.tokenid[0]) { // if we are in write consistency we need to validate choosen server
-		if ((ret = MyHGM->validate_write_gtid_ctx(this)) == 0) {
-			mc=thread->get_MySrvConn_local(this, c_ctx.srv);
-			if (!mc) {
-				mc=MyHGM->get_MySrvConn_from_pool(this, c_ctx.srv);
+		if (strcmp(c_ctx.tokenid, c_ctx.previd)) { // if our token has been temporary taken by someone else we already knows where to go
+			if ((ret = MyHGM->validate_write_gtid_ctx(this)) == 0) {
+				mc=thread->get_MySrvConn_local(this, c_ctx.srv);
+				if (!mc) {
+					mc=MyHGM->get_MySrvConn_from_pool(this, c_ctx.srv);
+				} else {
+					thread->status_variables.ConnPool_get_conn_immediate++;
+				}
+			} else if (ret == -1) {
+				Redis_Connection *rc = mybe->server_myds->rconn;
+				proxy_warning("Something wrong on validate: redis conn %p status %d reply %p\n", rc, rc ? rc->status : 0, rc ? rc->reply : 0);
 			} else {
-				thread->status_variables.ConnPool_get_conn_immediate++;
+				return; // Still running
 			}
-		} else if (ret == -1) {
-			Redis_Connection *rc = mybe->server_myds->rconn;
-			proxy_warning("Something wrong on validate: redis conn %p status %d reply %p\n", rc, rc ? rc->status : 0, rc ? rc->reply : 0);
-		} else {
-			return; // Still running
 		}
 	}
 ear: //End And Return
